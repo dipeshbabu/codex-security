@@ -2112,7 +2112,7 @@ describe("GitHub release workflow safeguards", () => {
       "Dispatch the verified GitHub release",
     );
     const mock = "gh() { printf '%s\\n' \"$@\"; }";
-    const result = spawnSync("bash", ["-c", `${mock}\n${script}`], {
+    const result = spawnSync(releaseTestBash, ["-c", `${mock}\n${script}`], {
       encoding: "utf8",
       env: {
         ...process.env,
@@ -2195,18 +2195,22 @@ describe("GitHub release workflow safeguards", () => {
       ].join("\n");
 
       try {
-        const result = spawnSync("bash", ["-c", `${mocks}\n${script}`], {
-          encoding: "utf8",
-          env: {
-            ...process.env,
-            GITHUB_OUTPUT: "/dev/null",
-            GITHUB_REPOSITORY: releaseRepository,
-            INPUT_RUN_ID: releaseRun,
-            INPUT_TAG: "npm-v0.1.2",
-            MOCK_RUN_STATE: state,
+        const result = spawnSync(
+          releaseTestBash,
+          ["-c", `${mocks}\n${script}`],
+          {
+            encoding: "utf8",
+            env: {
+              ...process.env,
+              GITHUB_OUTPUT: "/dev/null",
+              GITHUB_REPOSITORY: releaseRepository,
+              INPUT_RUN_ID: releaseRun,
+              INPUT_TAG: "npm-v0.1.2",
+              MOCK_RUN_STATE: state,
+            },
+            timeout: 10_000,
           },
-          timeout: 10_000,
-        });
+        );
 
         expect(result.status).toBe(0);
         expect(readFileSync(sleeps, "utf8")).toBe("2\n");
@@ -2238,7 +2242,7 @@ describe("GitHub release workflow safeguards", () => {
       "}",
       "sleep() { return 99; }",
     ].join("\n");
-    const result = spawnSync("bash", ["-c", `${mocks}\n${script}`], {
+    const result = spawnSync(releaseTestBash, ["-c", `${mocks}\n${script}`], {
       encoding: "utf8",
       env: {
         ...process.env,
@@ -2277,7 +2281,7 @@ describe("GitHub release workflow safeguards", () => {
       "}",
       "sleep() { :; }",
     ].join("\n");
-    const result = spawnSync("bash", ["-c", `${mocks}\n${script}`], {
+    const result = spawnSync(releaseTestBash, ["-c", `${mocks}\n${script}`], {
       encoding: "utf8",
       env: {
         ...process.env,
