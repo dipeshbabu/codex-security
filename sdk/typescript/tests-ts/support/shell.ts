@@ -1,12 +1,17 @@
-import { execFile } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { resolve } from "node:path";
 
 export function bashCommand(): string {
   if (process.platform !== "win32") return "bash";
   const git = Bun.which("git");
   if (git === null) return "bash";
-  const gitBash = join(dirname(dirname(git)), "bin", "bash.exe");
+  const gitExecPath = execFileSync(git, ["--exec-path"], {
+    encoding: "utf8",
+    timeout: 10_000,
+    windowsHide: true,
+  }).trim();
+  const gitBash = resolve(gitExecPath, "..", "..", "..", "bin", "bash.exe");
   return existsSync(gitBash) ? gitBash : "bash";
 }
 
