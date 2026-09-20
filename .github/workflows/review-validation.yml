@@ -102,6 +102,8 @@ jobs:
           commit: 6245a1e4654108faadb4592d5c84323b3024e477
         - os: ubuntu-24.04
           commit: 6245a1e4654108faadb4592d5c84323b3024e477
+        - os: macos-latest
+          commit: 6245a1e4654108faadb4592d5c84323b3024e477
     steps:
     - *id001
     - *id002
