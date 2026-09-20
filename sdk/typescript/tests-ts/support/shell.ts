@@ -1,17 +1,18 @@
-import { execFile, execFileSync } from "node:child_process";
+import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
-import { resolve } from "node:path";
+import { dirname, join } from "node:path";
 
 export function bashCommand(): string {
   if (process.platform !== "win32") return "bash";
   const git = Bun.which("git");
   if (git === null) return "bash";
-  const gitExecPath = execFileSync(git, ["--exec-path"], {
-    encoding: "utf8",
-    windowsHide: true,
-  }).trim();
-  const gitBash = resolve(gitExecPath, "../../..", "bin", "bash.exe");
-  return existsSync(gitBash) ? gitBash : "bash";
+  const parent = dirname(dirname(git));
+  // Git for Windows exposes git.exe from cmd, bin, and mingw64/bin.
+  for (const root of [parent, dirname(parent)]) {
+    const gitBash = join(root, "bin", "bash.exe");
+    if (existsSync(gitBash)) return gitBash;
+  }
+  return "bash";
 }
 
 export function runCommand(

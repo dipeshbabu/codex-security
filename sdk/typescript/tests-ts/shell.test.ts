@@ -1,30 +1,30 @@
-import { execFileSync } from "node:child_process";
-import { delimiter, resolve } from "node:path";
-import { expect, test } from "bun:test";
-import { bashCommand } from "./support/shell.js";
+import { isAbsolute, join, resolve } from "node:path";
+import { expect, spyOn, test } from "bun:test";
+import { bashCommand, runCommand } from "./support/shell.js";
 
-const testWindows = process.platform === "win32" ? test : test.skip;
-
-testWindows(
-  "finds Git Bash when Git's mingw64 bin directory leads PATH",
-  () => {
-    const execPath = execFileSync("git", ["--exec-path"], {
-      encoding: "utf8",
-    }).trim();
-    const originalPath = process.env["PATH"];
+test.skipIf(process.platform !== "win32").each(["cmd", "bin", "mingw64/bin"])(
+  "uses Git Bash when Git is found in %s",
+  async (directory) => {
+    const gitExecPath = await runCommand("git", ["--exec-path"], {
+      timeout: 10_000,
+    });
+    expect(gitExecPath.status).toBe(0);
+    const gitRoot = resolve(gitExecPath.stdout.trim(), "..", "..", "..");
+    const which = spyOn(Bun, "which").mockReturnValue(
+      join(gitRoot, directory, "git.exe"),
+    );
+    let bash: string;
     try {
-      process.env["PATH"] = [resolve(execPath, "../../bin"), originalPath].join(
-        delimiter,
-      );
-      const bash = bashCommand();
-      expect(bash).toBe(resolve(execPath, "../../../bin/bash.exe"));
-      const output = execFileSync(bash, ["-c", "uname -s"], {
-        encoding: "utf8",
-      });
-      expect(output).toMatch(/^MINGW/u);
+      bash = bashCommand();
     } finally {
-      if (originalPath === undefined) delete process.env["PATH"];
-      else process.env["PATH"] = originalPath;
+      which.mockRestore();
     }
+
+    expect(isAbsolute(bash)).toBe(true);
+    const result = await runCommand(bash, ["-c", "uname -s"], {
+      timeout: 10_000,
+    });
+    expect(result.status).toBe(0);
+    expect(result.stdout.trim()).toMatch(/^MINGW/u);
   },
 );
