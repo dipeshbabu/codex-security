@@ -99,11 +99,11 @@ jobs:
       matrix:
         include:
         - os: windows-latest
-          commit: 6245a1e4654108faadb4592d5c84323b3024e477
+          commit: 6a1268a5ff2190dd384cf3845dbf8bbfe4bc4bcc
         - os: ubuntu-24.04
-          commit: 6245a1e4654108faadb4592d5c84323b3024e477
+          commit: 6a1268a5ff2190dd384cf3845dbf8bbfe4bc4bcc
         - os: macos-latest
-          commit: 6245a1e4654108faadb4592d5c84323b3024e477
+          commit: 6a1268a5ff2190dd384cf3845dbf8bbfe4bc4bcc
     steps:
     - *id001
     - *id002
