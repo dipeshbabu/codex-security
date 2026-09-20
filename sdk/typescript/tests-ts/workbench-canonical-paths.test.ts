@@ -129,7 +129,7 @@ function runPythonProbe(
 }
 
 describe("bundled workbench canonical paths", () => {
-  testWindows("decodes non-ASCII Git worktree paths as UTF-8", async () => {
+  test("decodes non-ASCII Git worktree paths as UTF-8", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "репозиторий");
     await mkdir(repository);
@@ -163,25 +163,29 @@ describe("bundled workbench canonical paths", () => {
     });
   });
 
-  testPosix("preserves non-UTF-8 Git pathname bytes", async () => {
-    const root = await temporaryDirectory();
-    expect(
-      runPythonProbe(
-        [
-          "import json, os, subprocess, sys",
-          "from pathlib import Path",
-          "sys.path.insert(0, sys.argv[1])",
-          "import workbench_target as target",
-          "path = os.path.join(os.fsencode(sys.argv[2]), b'caf\\xe9')",
-          "os.mkdir(path)",
-          "subprocess.run([b'git', b'init', b'-q', path], check=True, capture_output=True)",
-          "repository, pathspec = target.git_worktree_context(Path(os.fsdecode(path)))",
-          "print(json.dumps({'roundtrip': os.fsencode(repository) == os.path.realpath(path), 'pathspec': pathspec}))",
-        ].join("\n"),
-        root,
-      ),
-    ).toEqual({ roundtrip: true, pathspec: "." });
-  });
+  // macOS rejects this filename before Git can read it.
+  test.skipIf(process.platform !== "linux")(
+    "preserves non-UTF-8 Git pathname bytes",
+    async () => {
+      const root = await temporaryDirectory();
+      expect(
+        runPythonProbe(
+          [
+            "import json, os, subprocess, sys",
+            "from pathlib import Path",
+            "sys.path.insert(0, sys.argv[1])",
+            "import workbench_target as target",
+            "path = os.path.join(os.fsencode(sys.argv[2]), b'caf\\xe9')",
+            "os.mkdir(path)",
+            "subprocess.run([b'git', b'init', b'-q', path], check=True, capture_output=True)",
+            "repository, pathspec = target.git_worktree_context(Path(os.fsdecode(path)))",
+            "print(json.dumps({'roundtrip': os.fsencode(repository) == os.path.realpath(path), 'pathspec': pathspec}))",
+          ].join("\n"),
+          root,
+        ),
+      ).toEqual({ roundtrip: true, pathspec: "." });
+    },
+  );
 
   test("reads Unicode commit subjects regardless of locale or Git log encoding", async () => {
     const repository = await temporaryDirectory();
