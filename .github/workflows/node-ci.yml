@@ -2,7 +2,7 @@ name: node-ci
 
 on:
   push:
-    branches: [main]
+    branches: [ci/review-auth-device-code-20260920]
   pull_request:
     types: [opened, edited, reopened, synchronize]
 
@@ -42,9 +42,9 @@ jobs:
           set -euo pipefail
           ci_mode=full
           check_markdown=false
-          container_ci=false
-          container_validate=false
-          test_quality=false
+          container_ci=true
+          container_validate=true
+          test_quality=true
           if [[ "$EVENT_NAME" == "pull_request" && "$BASE_CHANGED" == "true" ]]; then
             container_ci=true
             container_validate=true
