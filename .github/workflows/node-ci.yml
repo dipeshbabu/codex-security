@@ -665,11 +665,19 @@ jobs:
         run: exit 1
 
   package-tests:
-    name: package tests / seeded and randomized
+    name: package tests / ${{ matrix.mode }}
     needs: [validate-title, package]
     if: needs.validate-title.outputs.ci-mode == 'full'
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - mode: seed-12345
+            args: --seed 12345
+          - mode: randomized
+            args: ""
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -716,6 +724,4 @@ jobs:
           TMP: ${{ runner.temp }}
           TMPDIR: ${{ runner.temp }}
           CODEX_SECURITY_ALLOW_MACHINE_POLICY_TEST: "false"
-        run: |
-          pnpm run test --seed 12345
-          pnpm run test
+        run: pnpm run test ${{ matrix.args }}
