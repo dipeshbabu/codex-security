@@ -32,19 +32,19 @@ jobs:
       fail-fast: false
       matrix:
         include:
-        - commit: 46f2cb05492c7d937f02ef560362947fd36a5beb
+        - commit: 14a3b7b61673c25fae68341925ad613025cfad3d
           shard: 1
-        - commit: 46f2cb05492c7d937f02ef560362947fd36a5beb
+        - commit: 14a3b7b61673c25fae68341925ad613025cfad3d
           shard: 2
-        - commit: 46f2cb05492c7d937f02ef560362947fd36a5beb
+        - commit: 14a3b7b61673c25fae68341925ad613025cfad3d
           shard: 3
-        - commit: 46f2cb05492c7d937f02ef560362947fd36a5beb
+        - commit: 14a3b7b61673c25fae68341925ad613025cfad3d
           shard: 4
-        - commit: 46f2cb05492c7d937f02ef560362947fd36a5beb
+        - commit: 14a3b7b61673c25fae68341925ad613025cfad3d
           shard: 5
-        - commit: 46f2cb05492c7d937f02ef560362947fd36a5beb
+        - commit: 14a3b7b61673c25fae68341925ad613025cfad3d
           shard: 6
-        - commit: 46f2cb05492c7d937f02ef560362947fd36a5beb
+        - commit: 14a3b7b61673c25fae68341925ad613025cfad3d
           shard: 7
     steps:
     - &id001
@@ -129,7 +129,7 @@ jobs:
     strategy:
       matrix:
         commit:
-        - 46f2cb05492c7d937f02ef560362947fd36a5beb
+        - 14a3b7b61673c25fae68341925ad613025cfad3d
     steps:
     - *id001
     - *id002
@@ -137,5 +137,56 @@ jobs:
     - *id004
     - *id005
     - *id006
+    - run: pnpm --dir sdk/typescript run types
+    - run: pnpm --dir sdk/typescript run format
+  versions:
+    needs: native
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        - os: windows-latest
+          commit: d76f9646f82c3dd16362eda6ebafaa0e94f0c07f
+        - os: ubuntu-24.04
+          commit: d76f9646f82c3dd16362eda6ebafaa0e94f0c07f
+        - os: macos-latest
+          commit: d76f9646f82c3dd16362eda6ebafaa0e94f0c07f
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        ref: ${{ matrix.commit }}
+        persist-credentials: false
+    - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271
+      with:
+        run_install: false
+    - uses: actions/setup-node@v4
+      with:
+        node-version: 22.13.0
+        cache: pnpm
+        cache-dependency-path: sdk/typescript/pnpm-lock.yaml
+    - uses: oven-sh/setup-bun@v2
+      with:
+        bun-version: 1.3.14
+    - run: pnpm --dir sdk/typescript install --frozen-lockfile
+    - run: pnpm --dir plugins/codex-security/mcp-app install --frozen-lockfile
+    - uses: actions/download-artifact@v4
+      with:
+        name: native-base
+        path: plugins/codex-security/native/prebuilt
+    - run: node sdk/typescript/scripts/build-plugin.mjs
+    - name: Private Windows test root
+      if: runner.os == 'Windows'
+      id: private
+      shell: pwsh
+      run: ./sdk/typescript/scripts/prepare-windows-test-root.ps1
+    - name: Version comparison regression suite
+      working-directory: sdk/typescript
+      env:
+        TEMP: ${{ steps.private.outputs.path || runner.temp }}
+        TMP: ${{ steps.private.outputs.path || runner.temp }}
+        TMPDIR: ${{ steps.private.outputs.path || runner.temp }}
+      run: bun test --timeout 120000 ./tests-ts/update-notice.test.ts
     - run: pnpm --dir sdk/typescript run types
     - run: pnpm --dir sdk/typescript run format
