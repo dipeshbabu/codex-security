@@ -167,6 +167,39 @@ describe("CLI update notice", () => {
       // Mixed identifier lists follow pairwise precedence.
       ["1.0.0-alpha.2", "1.0.0-alpha.10", true],
       ["1.0.0-alpha.2", "1.0.0-alpha.beta", true],
+      ["1.0.0-alpha.1", "1.0.0-alpha-1", true],
+      ["1.0.0-alpha-1", "1.0.0-alpha.1", false],
+    ] as const) {
+      const notice = await checkForUpdate({
+        environment: {},
+        currentVersion: current,
+        fetch: registryResponse(latest),
+      });
+      expect(notice !== undefined).toBe(available);
+    }
+  });
+
+  test("compares numeric prerelease identifiers without losing precision", async () => {
+    for (const [current, latest, available] of [
+      ["1.0.0-alpha.9007199254740992", "1.0.0-alpha.9007199254740993", true],
+      ["1.0.0-alpha.9007199254740993", "1.0.0-alpha.9007199254740992", false],
+      [
+        "1.0.0-alpha.9007199254740992.99",
+        "1.0.0-alpha.9007199254740993.0",
+        true,
+      ],
+      [
+        "1.0.0-alpha.9007199254740993.0",
+        "1.0.0-alpha.9007199254740992.99",
+        false,
+      ],
+      [
+        "1.0.0-alpha.999999999999999999999999",
+        "1.0.0-alpha.1000000000000000000000000",
+        true,
+      ],
+      ["1.0.0-alpha.9007199254740993", "1.0.0-alpha.-suffix", true],
+      ["1.0.0-alpha.-suffix", "1.0.0-alpha.9007199254740993", false],
     ] as const) {
       const notice = await checkForUpdate({
         environment: {},

@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import semverGt from "semver/functions/gt.js";
+import SemVer from "semver/classes/semver.js";
 
 const PACKAGE_VERSIONS = packageVersions(
   new URL("../package.json", import.meta.url),
@@ -115,7 +115,7 @@ export async function checkForUpdate({
       manifest === null ||
       !("version" in manifest) ||
       typeof manifest.version !== "string" ||
-      !semverGt(manifest.version, currentVersion)
+      !isNewerVersion(manifest.version, currentVersion)
     ) {
       return undefined;
     }
@@ -128,6 +128,41 @@ export async function checkForUpdate({
   } catch {
     return undefined;
   }
+}
+
+function isNewerVersion(latest: string, current: string): boolean {
+  const latestVersion = new SemVer(latest);
+  const currentVersion = new SemVer(current);
+  const mainOrder = latestVersion.compareMain(currentVersion);
+  if (mainOrder !== 0) return mainOrder > 0;
+
+  const left = latestVersion.prerelease;
+  const right = currentVersion.prerelease;
+  if (left.length === 0 || right.length === 0) {
+    return left.length === 0 && right.length > 0;
+  }
+
+  for (let index = 0; index < Math.max(left.length, right.length); index++) {
+    const a = left[index];
+    const b = right[index];
+    if (a === undefined) return false;
+    if (b === undefined) return true;
+    if (a === b) continue;
+
+    const aNumeric = typeof a === "number" || /^\d+$/u.test(a);
+    const bNumeric = typeof b === "number" || /^\d+$/u.test(b);
+    if (aNumeric && bNumeric) {
+      // SemVer permits numeric prerelease identifiers beyond Number's precision.
+      const aValue = BigInt(a);
+      const bValue = BigInt(b);
+      if (aValue !== bValue) return aValue > bValue;
+    } else if (aNumeric !== bNumeric) {
+      return !aNumeric;
+    } else {
+      return String(a) > String(b);
+    }
+  }
+  return false;
 }
 
 export function formatUpdateNotice(notice: UpdateNotice): string {
