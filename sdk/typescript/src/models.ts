@@ -10,7 +10,7 @@ export interface ScanManifest {
       version: string;
       [k: string]: unknown;
     };
-    status: "completed";
+    status: "completed" | "failed" | "canceled" | "interrupted";
     startedAt: string;
     completedAt: string;
     sealedAt: string;
@@ -283,11 +283,7 @@ export interface CoverageDocument {
     | "deep_repository";
   completeness: "complete" | "partial" | "unknown";
   inventoryStrategy:
-    | "repository"
-    | "scoped_path"
-    | "diff"
-    | "directory"
-    | "custom";
+    "repository" | "scoped_path" | "diff" | "directory" | "custom";
   includePaths: string[];
   excludePaths: string[];
   surfaces: {
