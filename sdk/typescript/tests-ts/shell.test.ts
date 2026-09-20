@@ -1,17 +1,15 @@
-import { execFileSync } from "node:child_process";
 import { isAbsolute, join, resolve } from "node:path";
 import { expect, spyOn, test } from "bun:test";
 import { bashCommand, runCommand } from "./support/shell.js";
 
-test.skipIf(process.platform !== "win32").each(["cmd", "mingw64/bin"])(
+test.skipIf(process.platform !== "win32").each(["cmd", "bin", "mingw64/bin"])(
   "uses Git Bash when Git is found in %s",
   async (directory) => {
-    const gitExecPath = execFileSync("git", ["--exec-path"], {
-      encoding: "utf8",
+    const gitExecPath = await runCommand("git", ["--exec-path"], {
       timeout: 10_000,
-      windowsHide: true,
-    }).trim();
-    const gitRoot = resolve(gitExecPath, "..", "..", "..");
+    });
+    expect(gitExecPath.status).toBe(0);
+    const gitRoot = resolve(gitExecPath.stdout.trim(), "..", "..", "..");
     const which = spyOn(Bun, "which").mockReturnValue(
       join(gitRoot, directory, "git.exe"),
     );
