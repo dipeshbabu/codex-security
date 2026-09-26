@@ -94,16 +94,11 @@ export async function resolveTrustedExecutable(
         process.platform === "win32" ? constants.F_OK : constants.X_OK,
       );
       if (!(await stat(canonical)).isFile()) continue;
-      const canonicalParent = await realpath(dirname(current.path)).catch(
-        () => null,
-      );
-      const invocationPath =
-        canonicalParent === null
-          ? current.path
-          : join(canonicalParent, basename(current.path));
-      // Explicit launchers outside the protected root retain invocation semantics
-      // such as Python virtualenv selection. Repository-local links still execute
-      // only the canonical target that passed the trust check.
+      // Keep explicit virtualenv launchers, but resolve repository-local aliases
+      // to the trusted target instead of invoking them from the repository.
+      const invocationPath = pathLike
+        ? join(await realpath(dirname(current.path)), basename(current.path))
+        : current.path;
       executable ??=
         pathLike && isWithin(root, invocationPath) ? canonical : current.path;
     } catch {

@@ -5845,7 +5845,7 @@ describe("runtime directories and plugin Python boundary", () => {
             : { SystemRoot: process.env["SystemRoot"] }),
         },
       }),
-    ).toBe(await realpath(interpreter!));
+    ).toBe(interpreter!);
   });
 
   test.skipIf(process.platform !== "win32")(
