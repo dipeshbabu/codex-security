@@ -274,6 +274,19 @@ describe("GitHub code scanning import", () => {
       createAuthenticatedGitHub("github.com", { token: " " }),
     ).rejects.toThrow("must not be empty");
   });
+
+  test.each(["github.com", "GITHUB.COM", "GitHub.Com"])(
+    "uses the public GitHub API for hostname %s",
+    async (host) => {
+      const client = await createAuthenticatedGitHub(host, {
+        token: "SYNTHETIC_SDK_TOKEN",
+        environment: {},
+      });
+      expect(client.request.endpoint("GET /user").url).toBe(
+        "https://api.github.com/user",
+      );
+    },
+  );
 });
 
 describe("GitHub import CLI", () => {
