@@ -282,9 +282,9 @@ describe("GitHub code scanning import", () => {
         token: "SYNTHETIC_SDK_TOKEN",
         environment: {},
       });
-      expect(client.request.endpoint("GET /user").url).toBe(
-        "https://api.github.com/user",
-      );
+      expect(client.request.endpoint("GET /user")).toMatchObject({
+        url: "https://api.github.com/user",
+      });
     },
   );
 });
