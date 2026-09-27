@@ -208,7 +208,34 @@ describe("Codex authentication process boundary", () => {
     }
   });
 
-  test("bounds interactive output while retaining discovered instructions", async () => {
+  test.each(["User code: RIGHT-CODE", "Code: RIGHT-CODE", "RIGHT-CODE"])(
+    "ignores URL parameters when reading device instructions: %s",
+    async (instruction) => {
+      const root = await mkdtemp(join(tmpdir(), "codex-security-auth-code-"));
+      temporaryDirectories.push(root);
+      const script = join(root, "login.mjs");
+      const url = "https://auth.example.test/device?code=WRONG-CODE";
+      await writeFile(
+        script,
+        `process.stderr.write(${JSON.stringify(`Open ${url}\n${instruction}\n`)}, () => process.exit(0));\n`,
+      );
+      const command = execFileSync("node", ["-p", "process.execPath"], {
+        encoding: "utf8",
+      }).trim();
+      const handle = new CodexLoginHandle(
+        { command },
+        [script],
+        process.env,
+        () => {},
+      );
+
+      await expect(handle.wait()).resolves.toMatchObject({ success: true });
+      expect(handle.verificationUrl).toBe(url);
+      expect(handle.userCode).toBe("RIGHT-CODE");
+    },
+  );
+
+  test("retains large interactive output and login instructions", async () => {
     const root = await mkdtemp(join(tmpdir(), "codex-security-auth-output-"));
     temporaryDirectories.push(root);
     const script = join(root, "login.mjs");
