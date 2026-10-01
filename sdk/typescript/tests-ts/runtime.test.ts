@@ -5,6 +5,7 @@ import { existsSync, renameSync, symlinkSync } from "node:fs";
 import {
   chmod,
   copyFile,
+  cp,
   link,
   lstat,
   mkdir,
@@ -75,6 +76,7 @@ import {
   preparePersistentOutputRoot,
   prepareScanArtifactRestorer,
   preserveCodexSecurityPluginRegistration,
+  environmentWithGit,
   requirePrivateCredentialHome,
   requirePrivateCredentialFile,
   requirePrivateOutputDirectory,
@@ -86,6 +88,7 @@ import {
   setCodexSecurityCredentialLogout,
   streamWindowsCredentialAclDescriptors,
 } from "../src/runtime.js";
+import { inspectTrustedExecutable } from "../src/trusted-executable.js";
 import { loadBundledRuntime, PLUGIN_ROOT } from "./plugin-root.js";
 import { runTestInSubprocess } from "./support/test-subprocess.js";
 import {
@@ -1689,6 +1692,147 @@ describe("plugin runtime preparation", () => {
       ["plugin", "add", "--json", "codex-security@codex-security-sdk"],
       ["plugin", "add", "--json", "codex-security@codex-security-sdk"],
     ]);
+  });
+
+  describe("installed plugin reuse", () => {
+    async function fixture() {
+      const root = await temporaryDirectory();
+      const selected = await plugin(root);
+      const home = join(root, "home");
+      const marketplace = join(home, "sdk-marketplace");
+      const staged = join(marketplace, "plugins", "codex-security");
+      const installed = join(home, "installed", "1.2.3");
+      const record = join(marketplace, "installed-plugin.json");
+      const configuration = `[marketplaces.codex-security-sdk]\nsource_type = "local"\nsource = ${JSON.stringify(marketplace)}\n`;
+      const calls: string[][] = [];
+      await mkdir(home);
+      const bootstrap = () =>
+        bootstrapPlugin(home, selected, {
+          codexCommand: { command: "/codex" },
+          runCodex: async (_command, args) => {
+            calls.push([...args]);
+            if (args[1] === "marketplace") {
+              await writeFile(join(home, "config.toml"), configuration);
+              return "";
+            }
+            await rm(installed, { recursive: true, force: true });
+            await cp(staged, installed, { recursive: true });
+            await writeFile(
+              join(home, "config.toml"),
+              `${configuration}\n[plugins."codex-security@codex-security-sdk"]\nenabled = true\n`,
+            );
+            return JSON.stringify({
+              installedPath: installed,
+              version: "1.2.3",
+            });
+          },
+        });
+      await bootstrap();
+      return { selected, home, staged, installed, record, calls, bootstrap };
+    }
+
+    test("preserves generated installed files during reuse", async () => {
+      const { installed, calls, bootstrap } = await fixture();
+      const generated = join(installed, "scripts", "__pycache__", "helper.pyc");
+      await mkdir(dirname(generated));
+      await writeFile(generated, "generated cache");
+
+      expect((await bootstrap()).installedRoot).toBe(installed);
+      expect(calls.filter((args) => args[1] === "add")).toHaveLength(1);
+      expect(await readFile(generated, "utf8")).toBe("generated cache");
+    });
+
+    test.each(["changed", "added", "removed"] as const)(
+      "refreshes %s same-version source files",
+      async (change) => {
+        const { selected, staged, installed, bootstrap } = await fixture();
+        const name = change === "added" ? "added.py" : "helper.py";
+        const source = join(selected, "scripts", name);
+        if (change === "removed") {
+          await rm(source);
+        } else {
+          // Same length as the original helper, so byte comparison must detect it.
+          await writeFile(source, "print('no')\n");
+        }
+
+        await bootstrap();
+
+        for (const root of [staged, installed]) {
+          const path = join(root, "scripts", name);
+          if (change === "removed") {
+            expect(existsSync(path)).toBe(false);
+          } else {
+            expect(await readFile(path, "utf8")).toBe("print('no')\n");
+          }
+        }
+      },
+    );
+
+    testPosix("refreshes changed source executable permissions", async () => {
+      const { selected, staged, installed, bootstrap } = await fixture();
+      await chmod(join(selected, "scripts", "helper.py"), 0o750);
+
+      await bootstrap();
+
+      for (const root of [staged, installed]) {
+        expect(
+          (await stat(join(root, "scripts", "helper.py"))).mode & 0o111,
+        ).toBe(0o110);
+      }
+    });
+
+    test.each([
+      "missing file",
+      "changed file",
+      "missing record",
+      "invalid record",
+      "disabled plugin",
+      "missing registration",
+      "extra staged file",
+    ])("repairs %s before reusing the installation", async (damage) => {
+      const { home, staged, installed, record, calls, bootstrap } =
+        await fixture();
+      const helper = join(installed, "scripts", "helper.py");
+      switch (damage) {
+        case "missing file":
+          await rm(helper);
+          break;
+        case "changed file":
+          await writeFile(helper, "print('no')\n");
+          break;
+        case "missing record":
+          await rm(record);
+          break;
+        case "invalid record":
+          await writeFile(record, "{");
+          break;
+        case "disabled plugin": {
+          const config = await readFile(join(home, "config.toml"), "utf8");
+          await writeFile(
+            join(home, "config.toml"),
+            config.replace("enabled = true", "enabled = false"),
+          );
+          break;
+        }
+        case "missing registration":
+          await writeFile(join(home, "config.toml"), "");
+          break;
+        case "extra staged file":
+          await writeFile(join(staged, "stale.py"), "pass\n");
+          break;
+      }
+
+      await bootstrap();
+      expect(calls.filter((args) => args[1] === "add")).toHaveLength(2);
+      expect(await readFile(helper, "utf8")).toBe("print('ok')\n");
+      expect(existsSync(join(staged, "stale.py"))).toBe(false);
+      expect(JSON.parse(await readFile(record, "utf8"))).toEqual({
+        installedPath: installed,
+        version: "1.2.3",
+      });
+      await bootstrap();
+      expect(calls.filter((args) => args[1] === "add")).toHaveLength(2);
+    });
   });
 
   test("does not preserve a different marketplace when numeric identities collide", async () => {
@@ -4790,6 +4934,86 @@ describe("runtime directories and plugin Python boundary", () => {
   });
 
   test.each([
+    ["unbound", false],
+    ["bound", true],
+  ] as const)(
+    "selects workbench Git for the requested target (%s)",
+    async (_label, bound) => {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repository");
+      const untrustedBin = join(repository, "tools");
+      const launchHome = join(root, "home");
+      const hostBin = join(launchHome, "tools");
+      const pluginRoot = join(root, "plugin");
+      const marker = join(root, "repository-git-executed");
+      const git = Bun.which("git");
+      const python = await resolvePluginPython();
+      expect(git).not.toBeNull();
+      if (git === null) return;
+      const trustedGit = join(
+        hostBin,
+        process.platform === "win32" ? "git.exe" : "git",
+      );
+      await mkdir(untrustedBin, { recursive: true });
+      await mkdir(join(repository, ".git"));
+      await mkdir(hostBin, { recursive: true });
+      await mkdir(join(pluginRoot, "scripts"), { recursive: true });
+      await symlink(await realpath(git), trustedGit);
+      await writeFile(
+        join(untrustedBin, basename(trustedGit)),
+        `#!/bin/sh\nprintf executed > ${JSON.stringify(marker)}\nexit 1\n`,
+        { mode: 0o700 },
+      );
+      await writeFile(
+        join(pluginRoot, "scripts", "workbench_db.py"),
+        [
+          "import json, os, sys",
+          "from pathlib import Path",
+          `sys.path.insert(0, ${JSON.stringify(join(PLUGIN_ROOT, "scripts"))})`,
+          "from workbench_target import git_command",
+          "assert os.environ.get('GIT_SSH_COMMAND') == 'synthetic-ssh'",
+          "target = Path(sys.argv[1])",
+          "completed = git_command(target, '--version', text=True)",
+          "completed.check_returncode()",
+          "print(json.dumps({'git': completed.args[0], 'path': os.environ.get('PATH'), 'binding': os.environ.get('CODEX_SECURITY_GIT')}))",
+        ].join("\n"),
+      );
+      const currentDirectory = spyOn(process, "cwd").mockReturnValue(
+        launchHome,
+      );
+      try {
+        const environment = {
+          PATH: [untrustedBin, hostBin].join(delimiter),
+          GIT_SSH_COMMAND: "synthetic-ssh",
+        };
+        const result = await runWorkbench(
+          {
+            python,
+            pluginRoot,
+            environment: bound
+              ? environmentWithGit(
+                  environment,
+                  await inspectTrustedExecutable(
+                    "git",
+                    environment,
+                    repository,
+                  ),
+                )
+              : environment,
+          },
+          [repository],
+        );
+        expect(result["git"]).toBe(trustedGit);
+        expect(result["binding"]).toBe(bound ? trustedGit : null);
+        if (bound) expect(result["path"]).toBe(hostBin);
+        expect(existsSync(marker)).toBe(false);
+      } finally {
+        currentDirectory.mockRestore();
+      }
+    },
+  );
+
+  test.each([
     ["legacy", "0.1.22", false, false, undefined],
     ["previous", "0.1.37", true, false, undefined],
     ["independent version", "1.0.0", true, false, undefined],
@@ -5853,6 +6077,53 @@ describe("runtime directories and plugin Python boundary", () => {
         },
       }),
     ).toBe(interpreter);
+  });
+
+  test("binds the plugin environment to inspected Git", () => {
+    const unbound = { Path: join(tmpdir(), "operator-tools"), KEEP: "1" };
+    expect(environmentWithGit(unbound, undefined)).toEqual(unbound);
+    const environment = environmentWithGit(
+      {
+        Path: join(tmpdir(), "repository-bin"),
+        PATH: join(tmpdir(), "other-repository-bin"),
+        Git_Config_Count: "1",
+        GIT_DIR: join(tmpdir(), "repository", ".git"),
+        Codex_Security_Git: join(tmpdir(), "repository-bin", "git"),
+        PYTHONUTF8: "1",
+        PYTHON: "selected-python",
+        CODEX_CLI_PATH: "selected-codex",
+        TEST: "1",
+      },
+      {
+        executable: join(tmpdir(), "trusted-bin", "git"),
+        environment: {
+          PATH: join(tmpdir(), "trusted-bin"),
+          OPENAI_API_KEY: "unselected-synthetic-key",
+          TEST: "old-snapshot",
+        },
+      },
+    );
+
+    expect(environment).toEqual({
+      CODEX_SECURITY_GIT: join(tmpdir(), "trusted-bin", "git"),
+      CODEX_CLI_PATH: "selected-codex",
+      GIT_DIR: join(tmpdir(), "repository", ".git"),
+      Git_Config_Count: "1",
+      PATH: join(tmpdir(), "trusted-bin"),
+      PYTHON: "selected-python",
+      PYTHONUTF8: "1",
+      TEST: "1",
+    });
+    expect(
+      environmentWithGit(
+        { Path: join(tmpdir(), "repository-bin"), GIT_DIR: ".git" },
+        { executable: null, environment: { PATH: "" } },
+      ),
+    ).toEqual({
+      CODEX_SECURITY_GIT: "",
+      GIT_DIR: ".git",
+      PATH: "",
+    });
   });
 
   test.skipIf(process.platform !== "win32")(
