@@ -1,0 +1,230 @@
+name: Validate updated Codex Security PRs
+'on':
+  push:
+    branches:
+    - ci/review-updates-20261001
+permissions:
+  contents: read
+  actions: read
+jobs:
+  native:
+    runs-on: ubuntu-24.04
+    steps:
+    - name: Download native runtime built from the current upstream base
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: gh run download 36906277909 --repo openai/codex-security --name native-universal-4096958d026f117bfb7b713a2ff234d8ab432883 --dir native-base
+    - uses: actions/upload-artifact@v4
+      with:
+        name: native-base
+        path: native-base
+        retention-days: 3
+  targeted:
+    name: PR ${{ matrix.pr }} (${{ matrix.os }})
+    needs: native
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        - pr: 186
+          commit: 362cf739f9eed2571250b9b57782eed60161310c
+          tests: ./tests-ts/knowledge-base.test.ts
+          os: ubuntu-24.04
+        - pr: 186
+          commit: 362cf739f9eed2571250b9b57782eed60161310c
+          tests: ./tests-ts/knowledge-base.test.ts
+          os: macos-latest
+        - pr: 186
+          commit: 362cf739f9eed2571250b9b57782eed60161310c
+          tests: ./tests-ts/knowledge-base.test.ts
+          os: windows-latest
+        - pr: 225
+          commit: 6b9fcb517d14a0aea734515091bbf5fc3c079536
+          tests: ./tests-ts/shell.test.ts
+          os: ubuntu-24.04
+        - pr: 225
+          commit: 6b9fcb517d14a0aea734515091bbf5fc3c079536
+          tests: ./tests-ts/shell.test.ts
+          os: macos-latest
+        - pr: 225
+          commit: 6b9fcb517d14a0aea734515091bbf5fc3c079536
+          tests: ./tests-ts/shell.test.ts
+          os: windows-latest
+        - pr: 232
+          commit: 14763bba13450187741450c94df3ae119c015599
+          tests: ./tests-ts/auth.test.ts
+          os: ubuntu-24.04
+        - pr: 232
+          commit: 14763bba13450187741450c94df3ae119c015599
+          tests: ./tests-ts/auth.test.ts
+          os: macos-latest
+        - pr: 232
+          commit: 14763bba13450187741450c94df3ae119c015599
+          tests: ./tests-ts/auth.test.ts
+          os: windows-latest
+        - pr: 980
+          commit: f5caed69f5057079f57f1ebb499c6988078304df
+          tests: ./tests-ts/project-config.test.ts
+          os: ubuntu-24.04
+        - pr: 980
+          commit: f5caed69f5057079f57f1ebb499c6988078304df
+          tests: ./tests-ts/project-config.test.ts
+          os: macos-latest
+        - pr: 980
+          commit: f5caed69f5057079f57f1ebb499c6988078304df
+          tests: ./tests-ts/project-config.test.ts
+          os: windows-latest
+        - pr: 981
+          commit: ed6ef4e3e2846599917ac0fe9f74a51a37a7fded
+          tests: ./tests-ts/cli-project-config.test.ts
+          os: ubuntu-24.04
+        - pr: 981
+          commit: ed6ef4e3e2846599917ac0fe9f74a51a37a7fded
+          tests: ./tests-ts/cli-project-config.test.ts
+          os: macos-latest
+        - pr: 981
+          commit: ed6ef4e3e2846599917ac0fe9f74a51a37a7fded
+          tests: ./tests-ts/cli-project-config.test.ts
+          os: windows-latest
+        - pr: 1066
+          commit: 6260673ebd41ac381b78bcb88710ecdd5f46a651
+          tests: ./tests-ts/dedupe-records.test.ts
+          os: ubuntu-24.04
+        - pr: 1066
+          commit: 6260673ebd41ac381b78bcb88710ecdd5f46a651
+          tests: ./tests-ts/dedupe-records.test.ts
+          os: macos-latest
+        - pr: 1066
+          commit: 6260673ebd41ac381b78bcb88710ecdd5f46a651
+          tests: ./tests-ts/dedupe-records.test.ts
+          os: windows-latest
+        - pr: 1067
+          commit: b725af0934f544702de5f58a115b10a2540152e0
+          tests: ./tests-ts/publish.test.ts
+          os: ubuntu-24.04
+        - pr: 1067
+          commit: b725af0934f544702de5f58a115b10a2540152e0
+          tests: ./tests-ts/publish.test.ts
+          os: macos-latest
+        - pr: 1067
+          commit: b725af0934f544702de5f58a115b10a2540152e0
+          tests: ./tests-ts/publish.test.ts
+          os: windows-latest
+        - pr: 1068
+          commit: bfb669fdbc3dc4fa734711fcba490e8ea01754d4
+          tests: ./tests-ts/auth.test.ts
+          os: ubuntu-24.04
+        - pr: 1068
+          commit: bfb669fdbc3dc4fa734711fcba490e8ea01754d4
+          tests: ./tests-ts/auth.test.ts
+          os: macos-latest
+        - pr: 1068
+          commit: bfb669fdbc3dc4fa734711fcba490e8ea01754d4
+          tests: ./tests-ts/auth.test.ts
+          os: windows-latest
+        - pr: 1069
+          commit: b19a92594bef19eac20627543db35e8e66b7db03
+          tests: ./tests-ts/github.test.ts
+          os: ubuntu-24.04
+        - pr: 1069
+          commit: b19a92594bef19eac20627543db35e8e66b7db03
+          tests: ./tests-ts/github.test.ts
+          os: macos-latest
+        - pr: 1069
+          commit: b19a92594bef19eac20627543db35e8e66b7db03
+          tests: ./tests-ts/github.test.ts
+          os: windows-latest
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        ref: ${{ matrix.commit }}
+        persist-credentials: false
+    - uses: pnpm/action-setup@v4
+      with:
+        run_install: false
+    - uses: actions/setup-node@v4
+      with:
+        node-version: 22.13.0
+        cache: pnpm
+        cache-dependency-path: sdk/typescript/pnpm-lock.yaml
+    - uses: oven-sh/setup-bun@v2
+      with:
+        bun-version: 1.3.14
+    - run: pnpm --dir sdk/typescript install --frozen-lockfile
+    - run: pnpm --dir plugins/codex-security/mcp-app install --frozen-lockfile
+    - uses: actions/download-artifact@v4
+      with:
+        name: native-base
+        path: plugins/codex-security/native/prebuilt
+    - run: node sdk/typescript/scripts/build-plugin.mjs
+    - name: Prepare private Windows test root
+      if: runner.os == 'Windows'
+      id: private
+      shell: pwsh
+      run: ./sdk/typescript/scripts/prepare-windows-test-root.ps1
+    - run: pnpm --dir sdk/typescript run types
+    - run: pnpm --dir sdk/typescript run format
+    - name: Affected test suite
+      working-directory: sdk/typescript
+      env: &id001
+        TEMP: ${{ steps.private.outputs.path || runner.temp }}
+        TMP: ${{ steps.private.outputs.path || runner.temp }}
+        TMPDIR: ${{ steps.private.outputs.path || runner.temp }}
+        CODEX_SECURITY_ALLOW_MACHINE_POLICY_TEST: 'false'
+      run: bun test --timeout 120000 ${{ matrix.tests }}
+  windows:
+    name: PR 225 Windows shard ${{ matrix.shard }}/7
+    needs: native
+    runs-on: windows-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        - commit: 6b9fcb517d14a0aea734515091bbf5fc3c079536
+          shard: 1
+        - commit: 6b9fcb517d14a0aea734515091bbf5fc3c079536
+          shard: 2
+        - commit: 6b9fcb517d14a0aea734515091bbf5fc3c079536
+          shard: 3
+        - commit: 6b9fcb517d14a0aea734515091bbf5fc3c079536
+          shard: 4
+        - commit: 6b9fcb517d14a0aea734515091bbf5fc3c079536
+          shard: 5
+        - commit: 6b9fcb517d14a0aea734515091bbf5fc3c079536
+          shard: 6
+        - commit: 6b9fcb517d14a0aea734515091bbf5fc3c079536
+          shard: 7
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        ref: ${{ matrix.commit }}
+        persist-credentials: false
+    - uses: pnpm/action-setup@v4
+      with:
+        run_install: false
+    - uses: actions/setup-node@v4
+      with:
+        node-version: 22.13.0
+        cache: pnpm
+        cache-dependency-path: sdk/typescript/pnpm-lock.yaml
+    - uses: oven-sh/setup-bun@v2
+      with:
+        bun-version: 1.3.14
+    - run: pnpm --dir sdk/typescript install --frozen-lockfile
+    - run: pnpm --dir plugins/codex-security/mcp-app install --frozen-lockfile
+    - uses: actions/download-artifact@v4
+      with:
+        name: native-base
+        path: plugins/codex-security/native/prebuilt
+    - run: node sdk/typescript/scripts/build-plugin.mjs
+    - name: Prepare private Windows test root
+      if: runner.os == 'Windows'
+      id: private
+      shell: pwsh
+      run: ./sdk/typescript/scripts/prepare-windows-test-root.ps1
+    - name: Windows CI shard
+      env: *id001
+      run: node sdk/typescript/scripts/run-ci-tests.mjs ${{ matrix.shard }}/7
