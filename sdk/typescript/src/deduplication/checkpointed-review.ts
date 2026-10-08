@@ -1,6 +1,6 @@
 import type { JsonObject } from "../config.js";
+import { configuredCodexHome } from "../auth.js";
 import { readFile } from "node:fs/promises";
-import { homedir } from "node:os";
 import { join } from "node:path";
 import { CodexSecurityError } from "../errors.js";
 import type { FindingSearchScope } from "../finding-retrieval.js";
@@ -8,7 +8,6 @@ import { FindingWorkflow, workflowDigest } from "../finding-workflow.js";
 import { CODEX_EXECUTABLE_VERSION } from "../version.js";
 import {
   codexSecurityCredentialHome,
-  expandHome,
   resolveCodexCommand,
 } from "../runtime.js";
 import type { CodexReview, CodexReviewRunner } from "./codex-review.js";
@@ -24,24 +23,20 @@ export async function reviewSettingsDigest(
   environment: NodeJS.ProcessEnv,
 ): Promise<string> {
   const homes = new Set([
-    expandHome(
-      environment["CODEX_HOME"] ?? join(homedir(), ".codex"),
-      environment,
-    ),
+    configuredCodexHome(environment),
     codexSecurityCredentialHome(environment),
   ]);
-  const configs = await Promise.all(
-    [...homes].map(async (home) => {
-      try {
-        return await readFile(join(home, "config.toml"), "utf8");
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
-        throw error;
-      }
-    }),
-  );
   return workflowDigest({
-    configs,
+    configs: await Promise.all(
+      [...homes].map(async (home) => {
+        try {
+          return await readFile(join(home, "config.toml"), "utf8");
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+          throw error;
+        }
+      }),
+    ),
     command: resolveCodexCommand(environment),
     baseUrl: environment["OPENAI_BASE_URL"],
   });

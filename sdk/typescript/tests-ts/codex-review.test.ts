@@ -1,19 +1,14 @@
+import { parseJsonLines } from "./support/json.js";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { existsSync } from "node:fs";
-import {
-  mkdir,
-  mkdtemp,
-  readFile,
-  realpath,
-  rm,
-  writeFile,
-} from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join, relative, resolve, win32 } from "node:path";
 import { parse, stringify } from "smol-toml";
 import { fileURLToPath } from "node:url";
 import { expect, mock, test } from "bun:test";
 import { CodexReviewRunner } from "../src/deduplication/codex-review.js";
+import { DEFAULT_CODEX_CONFIG, type JsonObject } from "../src/config.js";
 import { CheckpointedReviewRunner } from "../src/deduplication/checkpointed-review.js";
 import { FindingWorkflow } from "../src/finding-workflow.js";
 import { checkpointWorkbench } from "./support/workbench-fakes.js";
@@ -22,6 +17,7 @@ import { environmentEntry } from "../src/scan-comparison.js";
 import { runTestInSubprocess } from "./support/test-subprocess.js";
 import { retryDelay, waitForRetry } from "../src/deduplication/retry.js";
 import { isReviewRefusal } from "../src/deduplication/refusal.js";
+import { temporaryDirectory } from "./support/temporary-directories.js";
 
 const fixture = fileURLToPath(
   new URL("fixtures/codex-review.mjs", import.meta.url),
@@ -43,7 +39,7 @@ const failureReasons: Record<string, string> = {
   "bad-request-turn": "Invalid model configuration",
   "unknown-turn": "Unknown model failure",
   "request-error": "Authentication required",
-  "credential-error": "[redacted]",
+  "credential-error": "Authentication failed: Bearer synthetic-review-key",
   "invalid-json": "Codex returned malformed JSON",
   "invalid-submission": "Review validation failed: Invalid decision",
   "required-source-error":
@@ -92,18 +88,28 @@ const transportCases: {
   extraEnvironment?: Record<string, string>;
   windowsOnly?: boolean;
   commandAuth?: "direct" | "ambient";
+  windowsConfig?: JsonObject;
+  expectedWindowsSandbox?: string;
 }[] = [
   {
     scenario: "correction",
     name: "command auth without an API key",
     commandAuth: "direct",
+    windowsConfig: { features: { elevated_windows_sandbox: false } },
+    expectedWindowsSandbox: "unelevated",
   },
   {
     scenario: "correction",
     name: "command auth with ambient API key and relative home",
     commandAuth: "ambient",
+    windowsConfig: { windows: { sandbox: "unelevated" } },
+    expectedWindowsSandbox: "unelevated",
   },
-  { scenario: "retry-correction" },
+  {
+    scenario: "retry-correction",
+    windowsConfig: { features: { elevated_windows_sandbox: true } },
+    expectedWindowsSandbox: "elevated",
+  },
   { scenario: "text-only-correction" },
   { scenario: "cancel-continuation" },
   { scenario: "accepted-no-replay" },
@@ -150,13 +156,13 @@ for (const {
   extraEnvironment,
   windowsOnly = false,
   commandAuth,
+  windowsConfig,
+  expectedWindowsSandbox,
 } of transportCases) {
   const runCase = test.skipIf(windowsOnly && process.platform !== "win32");
   runCase(`Codex review transport: ${name}`, async () => {
     const modelHome = await mkdtemp(join(tmpdir(), "codex-review-test-"));
-    const checkout = await realpath(
-      await mkdtemp(join(tmpdir(), "codex-review-source-")),
-    );
+    const checkout = await temporaryDirectory("codex-review-source-", true);
     const ghConfig = await mkdtemp(join(tmpdir(), "codex-review-gh-"));
     const transcript = join(modelHome, "messages.jsonl");
     let child: ChildProcessWithoutNullStreams | undefined;
@@ -176,6 +182,7 @@ for (const {
       };
       const configuration = stringify({
         mcp_servers: { synthetic: { command: "synthetic-unused-command" } },
+        ...windowsConfig,
         ...(commandAuth
           ? {
               model_provider: "synthetic.provider",
@@ -261,7 +268,17 @@ for (const {
           },
         },
       );
-      let validations = 0;
+      const validate = mock((value: unknown) => {
+        if (
+          typeof value !== "object" ||
+          value === null ||
+          !("decision" in value) ||
+          value.decision !==
+            (scenario === "incomplete-content" ? "DISTINCT" : "SAME")
+        )
+          throw new Error("Invalid decision");
+        return { decision: value.decision };
+      });
       const checkpoints = checkpointWorkbench("blocked-review", {
         repository: checkout,
       });
@@ -295,18 +312,7 @@ for (const {
           required: ["decision"],
           additionalProperties: false,
         },
-        validate(value: unknown) {
-          validations++;
-          if (
-            typeof value !== "object" ||
-            value === null ||
-            !("decision" in value) ||
-            value.decision !==
-              (scenario === "incomplete-content" ? "DISTINCT" : "SAME")
-          )
-            throw new Error("Invalid decision");
-          return { decision: value.decision };
-        },
+        validate,
       });
       if (
         recovery ||
@@ -318,7 +324,7 @@ for (const {
         ].includes(scenario)
       ) {
         expect(await result).toEqual({ decision: "SAME" });
-        expect(validations).toBe(
+        expect(validate).toHaveBeenCalledTimes(
           recovery
             ? recovery === "invalid-submission"
               ? 3
@@ -335,7 +341,7 @@ for (const {
         expect(await result).toEqual({
           decision: scenario === "incomplete-content" ? "DISTINCT" : "SAME",
         });
-        expect(validations).toBe(1);
+        expect(validate).toHaveBeenCalledTimes(1);
       } else if (
         ["cancel", "cancel-continuation", "cancel-backoff"].includes(scenario)
       ) {
@@ -379,25 +385,23 @@ for (const {
               : 1) * sessions,
           reason: refused
             ? "The model refused the deduplication review."
-            : scenario === "credential-error"
-              ? "[redacted]"
-              : scenario === "invalid-submission"
-                ? "The submitted review failed semantic validation."
-                : scenario === "text-only"
-                  ? "Codex did not submit a validated review."
-                  : modelFailures.has(scenario)
-                    ? "Codex review turn failed."
-                    : reportsBlocker
-                      ? "A required review check could not be completed."
-                      : scenario === "request-error"
-                        ? "Codex rejected the review request."
-                        : "Codex review transport failed.",
+            : scenario === "invalid-submission"
+              ? "The submitted review failed semantic validation."
+              : scenario === "text-only"
+                ? "Codex did not submit a validated review."
+                : modelFailures.has(scenario)
+                  ? "Codex review turn failed."
+                  : reportsBlocker
+                    ? "A required review check could not be completed."
+                    : ["request-error", "credential-error"].includes(scenario)
+                      ? "Codex rejected the review request."
+                      : "Codex review transport failed.",
         });
         const supportBundle = JSON.stringify(reviewFailure.metadata);
         expect(supportBundle).not.toContain("synthetic-review-key");
         expect(supportBundle).not.toContain(checkout);
         expect(supportBundle).not.toContain("review-thread");
-        expect(validations).toBe(
+        expect(validate).toHaveBeenCalledTimes(
           scenario === "invalid-submission"
             ? 2 * sessions
             : modelFailures.has(scenario) ||
@@ -432,6 +436,13 @@ for (const {
         expect(args).toContain('cli_auth_credentials_store="ephemeral"');
       }
       expect(args.join(" ")).not.toContain("synthetic-review-key");
+      expect(
+        parse(args.find((value) => value.startsWith("windows="))!)["windows"],
+      ).toEqual({
+        sandbox:
+          expectedWindowsSandbox ??
+          (DEFAULT_CODEX_CONFIG["windows"] as { sandbox: string }).sandbox,
+      });
       const permissions = args.find((argument) =>
         argument.startsWith("permissions.codex_security_review="),
       );
@@ -442,16 +453,10 @@ for (const {
         `${JSON.stringify(resolve(ghConfig))}="deny"`,
       );
       if (scenario !== "cancel") {
-        const messages = (await readFile(transcript, "utf8"))
-          .trim()
-          .split("\n")
-          .map(
-            (line) =>
-              JSON.parse(line) as {
-                method?: string;
-                params?: { apiKey?: string };
-              },
-          );
+        const messages = parseJsonLines<{
+          method?: string;
+          params?: { apiKey?: string };
+        }>(await readFile(transcript, "utf8"));
         const loginRequest = messages.find(
           (message) => message.method === "account/login/start",
         );
@@ -633,7 +638,7 @@ test("retry backoff grows exponentially with jitter and preserves cancellation",
 test("a missing Codex executable is not retried", async () => {
   const root = await mkdtemp(join(tmpdir(), "codex-review-missing-command-"));
   let starts = 0;
-  const delays: number[] = [];
+  const delays = mock(async (_delay: number) => {});
   try {
     await writeFile(join(root, "config.toml"), "");
     const runner = new CodexReviewRunner(
@@ -645,9 +650,7 @@ test("a missing Codex executable is not retried", async () => {
       undefined,
       root,
       {
-        wait: async (delay) => {
-          delays.push(delay);
-        },
+        wait: delays,
       },
     );
     await expect(
@@ -661,7 +664,7 @@ test("a missing Codex executable is not retried", async () => {
       }),
     ).rejects.toThrow("ENOENT");
     expect(starts).toBe(1);
-    expect(delays).toEqual([]);
+    expect(delays).not.toHaveBeenCalled();
   } finally {
     await rm(root, { recursive: true, force: true });
   }
