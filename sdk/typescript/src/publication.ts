@@ -38,7 +38,7 @@ export interface PrepareScanPublicationOptions {
   environment?: NodeJS.ProcessEnv;
   signal?: AbortSignal;
   expectedScanId?: string;
-  /** Publish only these finding IDs (for example dedupe's uniqueFindingIds). */
+  /** Publish only these finding IDs from the supplied scan; dedupe representatives may belong to other scans. */
   findingIds?: readonly string[];
   /** Use this assessment; otherwise use the scan's saved classification when present. */
   classification?: SeverityClassification | ScanSeverityClassification;
@@ -54,15 +54,9 @@ export interface PreparedPublicationIssue {
 
 export interface PreparedScanPublication {
   scanId: string;
-  uploadId: string;
   scanDirectory: string;
   destination: LinearPublicationDestination;
   issues: PreparedPublicationIssue[];
-  /** Complete sealed membership, retained when only some findings become issues. */
-  sourceFindings?: Pick<
-    PreparedPublicationIssue,
-    "findingId" | "occurrenceId"
-  >[];
 }
 
 export function linearPublicationArguments(
@@ -142,15 +136,7 @@ export async function prepareScanPublication(
 
   return {
     scanId,
-    uploadId: scanId,
     scanDirectory: canonicalScanDirectory,
-    ...(classification === undefined && options.findingIds === undefined
-      ? {}
-      : {
-          sourceFindings: contract.findings.findings.map(
-            ({ findingId, occurrenceId }) => ({ findingId, occurrenceId }),
-          ),
-        }),
     destination: {
       type: options.destination,
       teamId: options.teamId,
@@ -270,7 +256,6 @@ function renderFindingDescription(
     ...(scan.scope.excludePaths.length === 0
       ? []
       : [`**Excluded scope:** ${scan.scope.excludePaths.join(", ")}`]),
-    `**Coverage:** ${coverage.completeness}`,
     `**Coverage mode:** ${coverage.mode}`,
     `**Scan mode:** ${scanMode(coverage.mode)}`,
     `**Started:** ${scan.startedAt}`,
@@ -332,12 +317,7 @@ function renderCodeEvidence(
   return [
     `### ${evidence.label}`,
     "",
-    renderLocation(target, {
-      path: evidence.path,
-      startLine: evidence.startLine,
-      ...(evidence.endLine === undefined ? {} : { endLine: evidence.endLine }),
-      ...(evidence.role === undefined ? {} : { role: evidence.role }),
-    }),
+    renderLocation(target, evidence),
     "",
     fencedCode(evidence.code, evidence.language),
     "",
