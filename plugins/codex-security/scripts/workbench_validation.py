@@ -16,10 +16,11 @@ from typing import Any
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import finalize_scan_contract as finalizer
-from workbench_scan_usage import TOKEN_FIELDS
+from workbench_scan_usage import TOKEN_FIELDS, valid_account_rate_limit
 from workbench_scan_usage import (
     _reject_nonstandard_json_number as reject_nonstandard_json_number,
 )
+from workbench_scan_usage import _timestamp as usage_timestamp
 
 reject_non_finite_json = finalizer._reject_non_finite_json
 
@@ -116,9 +117,15 @@ def _valid_measured_scan_usage(usage: object) -> bool:
         or len(set(warnings)) != len(warnings)
     ):
         return False
+    if "accountRateLimits" in usage:
+        limits = usage["accountRateLimits"]
+        if not isinstance(limits, list) or not all(
+            valid_account_rate_limit(limit) for limit in limits
+        ):
+            return False
     if coverage == "unavailable":
         return thread_count == 0 and set(usage).issubset(
-            {"coverage", "source", "threadCount", "warnings", "completion"}
+            {"coverage", "source", "threadCount", "warnings", "completion", "accountRateLimits"}
         )
 
     allowed_keys = {
@@ -128,6 +135,11 @@ def _valid_measured_scan_usage(usage: object) -> bool:
         "missingThreadCount",
         "warnings",
         "completion",
+        "byRole",
+        "window",
+        "observedAt",
+        "tokensUpdatedAt",
+        "accountRateLimits",
         *SCAN_USAGE_TOKEN_KEYS,
     }
     if thread_count == 0 or not set(usage).issubset(allowed_keys):
@@ -144,6 +156,30 @@ def _valid_measured_scan_usage(usage: object) -> bool:
         return False
     if coverage == "partial" and not (warnings or missing):
         return False
+    for field in ("observedAt", "tokensUpdatedAt"):
+        if field in usage and usage_timestamp(usage[field]) is None:
+            return False
+    if "window" in usage:
+        window = usage["window"]
+        if not isinstance(window, dict) or set(window) != {"startedAt", "endedAt"}:
+            return False
+        start, end = (usage_timestamp(window[key]) for key in ("startedAt", "endedAt"))
+        if start is None or end is None or start > end:
+            return False
+    if "byRole" in usage:
+        roles = usage["byRole"]
+        keys = {*SCAN_USAGE_TOKEN_KEYS, "threadCount"}
+        if not isinstance(roles, dict) or set(roles) != {"parent", "workers"}:
+            return False
+        if any(
+            not isinstance(role, dict)
+            or set(role) != keys
+            or any(type(role[key]) is not int or role[key] < 0 for key in keys)
+            for role in roles.values()
+        ):
+            return False
+        if any(sum(role[key] for role in roles.values()) != usage[key] for key in keys):
+            return False
     return True
 
 
