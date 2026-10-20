@@ -4,12 +4,15 @@ Windows does not implement Python's descriptor-relative ``dir_fd`` APIs or
 ``O_NOFOLLOW``.  This module provides the three operations needed by the scan
 finalizer without falling back to check-then-use path validation.
 
-The implementation opens every directory with ``FILE_FLAG_OPEN_REPARSE_POINT``
-and rejects all reparse points, including junctions.  Directory handles remain
-open without ``FILE_SHARE_DELETE`` for the full operation, which prevents an
+Scan-local reads, writes, and deletes open every directory with
+``FILE_FLAG_OPEN_REPARSE_POINT`` and reject all reparse points, including junctions.
+Directory handles remain open without ``FILE_SHARE_DELETE`` for the full
+operation, which prevents an
 already-validated ancestor from being renamed or replaced during a read,
 write, or delete.  Writes rename the exact temporary-file handle into place so
 an attacker cannot substitute another file at the temporary name.
+
+The snapshot helper copies junction metadata without opening the link target.
 
 Importing this module and comparing streams work on every platform. Filesystem
 operations raise ``WindowsScanLocalFileError`` outside Windows.
@@ -20,13 +23,13 @@ from __future__ import annotations
 import argparse
 import contextlib
 import ctypes
+import ctypes.wintypes as wintypes
 import errno
 import importlib
 import ntpath
 import os
 import secrets
 from collections.abc import Iterator
-from ctypes import wintypes
 from pathlib import Path, PurePosixPath
 from typing import BinaryIO
 
@@ -68,7 +71,9 @@ _ERROR_ACCESS_DENIED = 5
 _ERROR_SHARING_VIOLATION = 32
 _ERROR_LOCK_VIOLATION = 33
 _ERROR_FILE_EXISTS = 80
+_ERROR_INSUFFICIENT_BUFFER = 122
 _ERROR_ALREADY_EXISTS = 183
+_DACL_SECURITY_INFORMATION = 0x00000004
 _MISSING_ERRORS = {_ERROR_FILE_NOT_FOUND, _ERROR_PATH_NOT_FOUND}
 _COLLISION_ERRORS = {_ERROR_FILE_EXISTS, _ERROR_ALREADY_EXISTS}
 _INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
@@ -94,6 +99,14 @@ class _FileAttributeTagInfo(ctypes.Structure):
     _fields_ = [
         ("FileAttributes", wintypes.DWORD),
         ("ReparseTag", wintypes.DWORD),
+    ]
+
+
+class _SecurityAttributes(ctypes.Structure):
+    _fields_ = [
+        ("nLength", wintypes.DWORD),
+        ("lpSecurityDescriptor", wintypes.LPVOID),
+        ("bInheritHandle", wintypes.BOOL),
     ]
 
 
@@ -140,6 +153,17 @@ class _OwnedHandle:
 
 if os.name == "nt":
     _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    _advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+
+    _GetFileSecurityW = _advapi32.GetFileSecurityW
+    _GetFileSecurityW.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    _GetFileSecurityW.restype = wintypes.BOOL
 
     _CreateFileW = _kernel32.CreateFileW
     _CreateFileW.argtypes = [
@@ -201,6 +225,19 @@ if os.name == "nt":
         wintypes.LPVOID,
     ]
     _WriteFile.restype = wintypes.BOOL
+
+    _DeviceIoControl = _kernel32.DeviceIoControl
+    _DeviceIoControl.argtypes = [
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD),
+        wintypes.LPVOID,
+    ]
+    _DeviceIoControl.restype = wintypes.BOOL
 
     _FlushFileBuffers = _kernel32.FlushFileBuffers
     _FlushFileBuffers.argtypes = [wintypes.HANDLE]
@@ -309,6 +346,34 @@ def _create_file(
     return _OwnedHandle(int(handle))
 
 
+def copy_directory_junction(source: Path, destination: Path) -> None:
+    """Copy raw junction data to an empty directory without opening the link target."""
+    # MAXIMUM_REPARSE_DATA_BUFFER_SIZE, including the reparse data header.
+    data = ctypes.create_string_buffer(16 * 1024)
+    size = wintypes.DWORD()
+    for path, write in ((source, False), (destination, True)):
+        handle = _create_file(
+            path,
+            access=_GENERIC_WRITE if write else _FILE_READ_ATTRIBUTES,
+            share=_FILE_SHARE_READ | _FILE_SHARE_WRITE,
+            disposition=_OPEN_EXISTING,
+            flags=_FILE_FLAG_BACKUP_SEMANTICS | _FILE_FLAG_OPEN_REPARSE_POINT,
+        )
+        assert handle is not None
+        with handle:
+            if not _DeviceIoControl(
+                handle.value,
+                0x000900A4 if write else 0x000900A8,  # FSCTL_SET/GET_REPARSE_POINT.
+                data if write else None,
+                size.value if write else 0,
+                None if write else data,
+                0 if write else len(data),
+                ctypes.byref(size),
+                None,
+            ):
+                _raise_last_error("Copy directory junction", path)
+
+
 def _attributes(handle: int) -> _FileAttributeTagInfo:
     info = _FileAttributeTagInfo()
     if not _GetFileInformationByHandleEx(
@@ -394,6 +459,27 @@ def _create_directory(path: Path) -> None:
         return
     error = ctypes.get_last_error()
     if error not in _COLLISION_ERRORS:
+        _raise_last_error("CreateDirectoryW", path)
+
+
+def create_directory_with_same_dacl(path: Path, source: Path) -> None:
+    """Create an archive replacement with the original directory's DACL."""
+    _require_windows()
+    source_path = _extended_path(source)
+    size = wintypes.DWORD()
+    _GetFileSecurityW(source_path, _DACL_SECURITY_INFORMATION, None, 0, ctypes.byref(size))
+    if ctypes.get_last_error() != _ERROR_INSUFFICIENT_BUFFER:
+        _raise_last_error("GetFileSecurityW", source)
+    descriptor = ctypes.create_string_buffer(size.value)
+    if not _GetFileSecurityW(
+        source_path, _DACL_SECURITY_INFORMATION, descriptor, size.value, ctypes.byref(size)
+    ):
+        _raise_last_error("GetFileSecurityW", source)
+    attributes = _SecurityAttributes(
+        ctypes.sizeof(_SecurityAttributes), ctypes.cast(descriptor, wintypes.LPVOID), False
+    )
+    # Supply the descriptor at creation, without an inherited-access window.
+    if not _CreateDirectoryW(_extended_path(path), ctypes.byref(attributes)):
         _raise_last_error("CreateDirectoryW", path)
 
 

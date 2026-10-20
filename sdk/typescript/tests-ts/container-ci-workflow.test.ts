@@ -59,7 +59,6 @@ test("shares one native build and container matrix in automatic CI", () => {
     "Reject interactive repository discovery",
     "Verify hardened Codex command sandbox",
     "Verify host-scoped Git credentials",
-    "Verify findings API and persistent storage through consumer Compose",
   ]) {
     expect(steps.filter((step) => step.name === name)).toHaveLength(1);
   }
@@ -140,7 +139,7 @@ test.each([
 test("required CI rejects failed, cancelled, or skipped selected container checks", () => {
   const gate = ci.jobs["required-test"]!;
   expect(gate.needs).toContain("container-validate");
-  expect(gate.if).toBe("always()");
+  expect(gate.if).toStartWith("always() && (");
   const step = gate.steps!.find(
     (step) => step.name === "Require selected container coverage",
   )!;

@@ -1,4 +1,6 @@
+import type { Finding } from "../models.js";
 import { loadContractWithScanDirectory } from "../contract.js";
+import type { CodexSecuritySurface } from "../api.js";
 import { environmentEntry } from "../auth.js";
 import {
   bundledPluginRoot,
@@ -96,6 +98,7 @@ export async function deduplicateScanDirectory(
 }
 
 type DeduplicateScanDependencies = Partial<SavedScanDependencies> & {
+  surface?: CodexSecuritySurface;
   environment?: NodeJS.ProcessEnv;
   reviewer?: DeduplicationReviewer;
   reviewRunner?: Pick<CodexReviewRunner, "run">;
@@ -306,6 +309,7 @@ async function deduplicateResolvedScan(
         repositoryPath,
         undefined,
         options.onDiagnostic,
+        dependencies.surface ?? "sdk",
       );
     const privateStatePaths: string[] = [];
     if (workflow && !dependencies.reviewer) {
@@ -336,13 +340,11 @@ async function deduplicateResolvedScan(
           options.onDiagnostic,
         )
       : undefined;
-    const sourceRepositories = new Map<string, readonly string[]>(
-      contract.findings.findings.map((finding) => [
-        finding.findingId,
-        [contract.manifest.scan.target.targetId],
-      ]),
+    const selectedFindingIds = new Set(
+      contract.findings.findings.map((finding) => finding.findingId),
     );
-    const sourceSnapshots = new Map<string, FindingSourceSnapshot>();
+    const sourceRepositories = new Map<Finding, readonly string[]>();
+    const sourceSnapshots = new Map<Finding, FindingSourceSnapshot>();
     const deduplicator = new FindingDeduplicator(
       {
         potentialDuplicates: async (findingId) => {
@@ -361,17 +363,21 @@ async function deduplicateResolvedScan(
               ? neighborhood.repositoryIds![finding.findingId]
               : undefined;
             if (repositories !== undefined)
-              sourceRepositories.set(finding.findingId, repositories);
-            else if (scope.repositoryId !== undefined)
-              sourceRepositories.set(finding.findingId, [scope.repositoryId]);
+              sourceRepositories.set(finding, repositories);
+            else if (
+              scope.repositoryId !== undefined ||
+              selectedFindingIds.has(finding.findingId)
+            )
+              sourceRepositories.set(finding, [
+                scope.repositoryId ?? contract.manifest.scan.target.targetId,
+              ]);
             const snapshot = Object.hasOwn(
               neighborhood.sourceSnapshots ?? {},
               finding.findingId,
             )
               ? neighborhood.sourceSnapshots![finding.findingId]
               : undefined;
-            if (snapshot !== undefined)
-              sourceSnapshots.set(finding.findingId, snapshot);
+            if (snapshot !== undefined) sourceSnapshots.set(finding, snapshot);
           }
           return neighborhood;
         },
@@ -391,9 +397,7 @@ async function deduplicateResolvedScan(
       options.signal,
       options.concurrency,
     );
-    const reviewed = await deduplicator.run(
-      contract.findings.findings.map((finding) => finding.findingId),
-    );
+    const reviewed = await deduplicator.run([...selectedFindingIds]);
     await checkpoints?.assertSourceUnchanged();
     options.signal?.throwIfAborted();
     const result: DeduplicateScanResult = { scanId, ...reviewed };

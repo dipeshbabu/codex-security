@@ -1,7 +1,10 @@
 import { mkdir, readFile, symlink, writeFile } from "node:fs/promises";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { afterEach, expect, test, mock } from "bun:test";
+import { ScanCostTracker } from "../src/cost.js";
+import type { ScanTokenUsage } from "../src/index.js";
 import { CodexSecurity, type ScanOptions } from "../src/api.js";
 import { main } from "../src/cli.js";
 import type { CodexSecurityConfig, JsonObject } from "../src/config.js";
@@ -9,6 +12,7 @@ import type { ProjectConfigInput } from "../src/project-config-schema.js";
 import { readProjectConfig } from "../src/project-config.js";
 import { dependencies, fakeResult, fakeSecurity } from "./cli-fixtures.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
+import { copyCompletedScanFixture } from "./plugin-root.js";
 import { rejecting, throwing } from "./support/errors.js";
 import {
   createCliTest,
@@ -45,6 +49,45 @@ async function fixture(input: ProjectConfigInput | string) {
   return { root, repository, configDirectory, config };
 }
 
+async function bulkInventory(
+  input: Awaited<ReturnType<typeof fixture>>,
+  rowModes: readonly string[],
+) {
+  execFileSync("git", ["init", "-q", input.repository]);
+  execFileSync("git", [
+    "-C",
+    input.repository,
+    "-c",
+    "user.name=Test",
+    "-c",
+    "user.email=test@example.test",
+    "-c",
+    "commit.gpgsign=false",
+    "commit",
+    "--allow-empty",
+    "-qm",
+    "fixture",
+  ]);
+  const revision = execFileSync(
+    "git",
+    ["-C", input.repository, "rev-parse", "HEAD"],
+    { encoding: "utf8" },
+  ).trim();
+  const csv = join(input.root, "repositories.csv");
+  await writeFile(
+    csv,
+    [
+      "id,repository,revision,mode",
+      ...rowModes.map(
+        (mode, index) =>
+          `source-${index},${input.repository},${revision},${mode}`,
+      ),
+      "",
+    ].join("\n"),
+  );
+  return csv;
+}
+
 test.each([
   [undefined, "./node_modules"],
   ["starter.json", "./node_modules"],
@@ -70,6 +113,46 @@ test.each([
     const contents = await readFile(path, "utf8");
     expect(await runCapturedCli(main, args, deps)).toBe(2);
     expect(await readFile(path, "utf8")).toBe(contents);
+  },
+);
+
+test.each(["yaml", "json"])(
+  "init preserves URI-sensitive directory names in the %s schema reference",
+  async (extension) => {
+    const input = await fixture({});
+    const workspace = join(
+      input.root,
+      process.platform === "win32"
+        ? "project #draft %25"
+        : 'project #draft %25 ?review: "quoted"',
+    );
+    const schemaDirectory = join(
+      workspace,
+      "node_modules",
+      "@openai",
+      "codex-security",
+      "schemas",
+    );
+    await mkdir(schemaDirectory, { recursive: true });
+    const schema = join(schemaDirectory, "project-config.schema.json");
+    const contents = '{"type":"object"}\n';
+    await writeFile(schema, contents);
+    const path = join(input.configDirectory, `starter.${extension}`);
+
+    expect(
+      await runCapturedCli(
+        main,
+        ["init", path, "--json"],
+        dependencies({ currentDirectory: workspace }),
+      ),
+    ).toBe(0);
+
+    const selected = await readProjectConfig(path);
+    const reference = new URL(selected.input.$schema!, pathToFileURL(path));
+    expect(reference.hash).toBe("");
+    expect(reference.search).toBe("");
+    expect(await readFile(reference, "utf8")).toBe(contents);
+    expect(reference.href).toBe(pathToFileURL(schema).href);
   },
 );
 
@@ -312,6 +395,53 @@ test.each(["instructions_file", "validation_file"] as const)(
   },
 );
 
+test.each([
+  ["standard", [""], { max_time_minutes: 6000 }, undefined],
+  [
+    "deep",
+    ["standard"],
+    { max_time_minutes: 15, deep: { max_time_hours: 2 } },
+    undefined,
+  ],
+  [
+    "standard",
+    ["standard", "deep"],
+    { max_time_minutes: 15, deep: { max_time_hours: 2 } },
+    "Conflicting",
+  ],
+  ["deep", [""], { max_time_minutes: 6000 }, "5760 minutes"],
+] as const)(
+  "bulk time settings use effective row modes: default %s, rows %j",
+  async (defaultMode, rowModes, time, message) => {
+    const input = await fixture({
+      scan: { mode: defaultMode, ...time },
+      output: { directory: "../batch-results" },
+    });
+    const csv = await bulkInventory(input, rowModes);
+    const selected: ScanOptions[] = [];
+    const { runCli, stderr } = createCliTest(main);
+    const result = await runCli(
+      ["bulk-scan", csv, "-c", input.config, "--json"],
+      dependencies({
+        currentDirectory: input.root,
+        onTurn: (_repository, options) => selected.push(options),
+      }),
+    );
+    expect(result, stderr.text()).toBe(message ? 2 : 0);
+    if (message) {
+      expect(stderr.text()).toContain(message);
+      expect(selected).toEqual([]);
+    } else {
+      expect(selected).toHaveLength(1);
+      expect(selected[0]).toMatchObject({
+        mode: "standard",
+        maxTimeMinutes: time.max_time_minutes,
+      });
+      expect(selected[0]?.maxTimeHours).toBeUndefined();
+    }
+  },
+);
+
 test("bulk scans apply config and linked operator prompts, preserve CSV scope overrides, and retain the policy on resume", async () => {
   const config: ProjectConfigInput = {
     auth: "api-key",
@@ -384,17 +514,12 @@ test("bulk scans apply config and linked operator prompts, preserve CSV scope ov
     return fakeSecurity(async (_repository, options = {}) => {
       selected.push(options);
       const result = fakeResult(["high"]);
-      await mkdir(options.outputDir!, { recursive: true });
-      for (const [name, content] of Object.entries({
-        "scan-manifest.json": result.manifest,
-        "findings.json": result.findings,
-        "coverage.json": result.coverage,
-        "report.md": "Synthetic report.",
-      }))
-        await writeFile(
-          join(options.outputDir!, name),
-          typeof content === "string" ? content : JSON.stringify(content),
-        );
+      await mkdir(options.outputDir!, { recursive: true, mode: 0o700 });
+      await copyCompletedScanFixture(options.outputDir!);
+      await writeFile(
+        join(options.outputDir!, "report.md"),
+        "Synthetic report.",
+      );
       return result;
     });
   };
@@ -979,11 +1104,14 @@ test("a malformed selected file fails before constructing a client", async () =>
     ),
   ).toBe(2);
   expect(onConfig).not.toHaveBeenCalled();
-  expect(stderr.text()).toContain("Cannot parse project configuration");
+  expect(stderr.text()).toContain(
+    `Cannot parse project configuration at ${input.config}: `,
+  );
+  expect(stderr.text()).toContain("end with a ]");
   expect(JSON.parse(stdout.text())).toEqual({
     status: "failed",
     code: "SCAN_FAILED",
-    message: `Cannot parse project configuration at ${input.config}.`,
+    message: expect.stringContaining("end with a ]"),
   });
 });
 
@@ -1157,6 +1285,9 @@ test("rerun restores all saved deep settings and authentication without loading 
 
 test.each([
   [{ requiresScanPrompt: true }, "additional instructions"],
+  [{ maxTimeMinutes: 0 }, "invalid investigation time limit"],
+  [{ maxTimeMinutes: "15" }, "invalid investigation time limit"],
+  [{ maxTimeMinutes: 1e12 }, "deadline within the supported date range"],
   [
     { mode: "deep", deepScan: { workers: 7 }, deepScanResolved: true },
     "missing resolved deep scan settings",
@@ -1172,11 +1303,11 @@ test.each([
       config: {},
       ...extra,
     };
-    const stderr = captureCli(main, "stderr");
+    const { stdout, stderr, runCli } = createCliTest(main);
     const onRun = mock();
     expect(
-      await stderr.run(
-        ["scans", "rerun", "saved", "--json"],
+      await runCli(
+        ["scans", "rerun", "saved", "--json", "--full-output"],
         dependencies({
           currentDirectory: input.repository,
           onWorkbench: async () => ({ recipe }),
@@ -1185,6 +1316,98 @@ test.each([
       ),
     ).toBe(2);
     expect(stderr.text()).toContain(message);
+    expect(JSON.parse(stdout.text())).toMatchObject({
+      ok: false,
+      error: { message: expect.stringContaining(message) },
+    });
     expect(onRun).not.toHaveBeenCalled();
+  },
+);
+
+test.each([
+  { model: "gpt-5.6-sol", showCost: false },
+  { model: "gpt-5.6-sol", showCost: true },
+  { model: "synthetic-unpriced-model", showCost: false },
+  { model: "synthetic-unpriced-model", showCost: true },
+])(
+  "headless component usage is printed once for %p",
+  async ({ model, showCost }) => {
+    const input = await fixture({
+      output: { directory: "../component-results" },
+    });
+    await writeFile(
+      join(input.repository, "lib", "index.ts"),
+      "export const value = 1;\n",
+    );
+    const usage: ScanTokenUsage = {
+      input_tokens: 1250,
+      cached_input_tokens: 200,
+      cache_write_input_tokens: 0,
+      output_tokens: 30,
+      reasoning_output_tokens: 0,
+      total_tokens: 1280,
+    };
+    const { stderr, runCli } = createCliTest(main);
+    const deps = dependencies({ currentDirectory: input.root });
+    deps.createSecurity = () =>
+      fakeSecurity(async (_repository, options) => {
+        const tracker = new ScanCostTracker({
+          codexHome: input.root,
+          model,
+          onUsage: options?.onUsage,
+          onCost: (cost, complete) => {
+            if (complete) options?.onCost?.(cost);
+          },
+        });
+        tracker.start("synthetic-scan-thread");
+        await tracker.stop(usage);
+        return fakeResult([], "complete", null);
+      });
+    expect(
+      await runCli(
+        [
+          "scan-components",
+          input.repository,
+          "-c",
+          input.config,
+          "--component",
+          "lib",
+          "--headless",
+          "--json",
+          ...(showCost ? ["--show-cost"] : []),
+        ],
+        deps,
+      ),
+    ).toBe(0);
+    expect(stderr.text().match(/Tokens:/g)).toHaveLength(1);
+    expect(stderr.text()).toContain("Tokens: 1,050 uncached input");
+    expect(stderr.text()).toContain("30 output");
+    expect(stderr.text().includes("Cost:")).toBe(
+      showCost && model === "gpt-5.6-sol",
+    );
+  },
+);
+
+test.each(["yaml", "toon", "json"])(
+  "a long framework error keeps its whole message with --format %s",
+  async (format) => {
+    const root = await temporaryDirectory();
+    const missing = join(
+      root,
+      "a-directory-name-long-enough-to-make-yaml-fold-the-line",
+      "nested\\scan.yaml",
+    );
+    const { stderr, runCli } = createCliTest(main);
+    expect(
+      await runCli(
+        ["info", "-c", missing, "--format", format],
+        dependencies({ currentDirectory: root }),
+      ),
+    ).toBe(2);
+    const message =
+      format === "json"
+        ? JSON.parse(stderr.text().replace(/^codex-security: /u, "")).message
+        : stderr.text();
+    expect(message).toContain(missing);
   },
 );

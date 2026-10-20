@@ -1,4 +1,5 @@
-import { readFile, writeFile } from "node:fs/promises";
+import assert from "node:assert/strict";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import Ajv from "ajv";
@@ -12,6 +13,7 @@ import {
   type ProjectConfigInput,
 } from "../src/project-config-schema.js";
 import { DEFAULT_DEEP_SCAN_SETTINGS } from "../src/deep-scan-defaults.js";
+import { ConfigurationError } from "../src/errors.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 
 const { temporaryDirectory, cleanup } =
@@ -20,6 +22,18 @@ afterEach(cleanup);
 
 const cases: [string, unknown, boolean][] = [
   ["minimal file", {}, true],
+  [
+    "fractional investigation minutes",
+    { scan: { max_time_minutes: 0.5 } },
+    true,
+  ],
+  ["unset Standard cap", { scan: { max_time_minutes: 6000 } }, true],
+  [
+    "nonpositive investigation minutes",
+    { scan: { max_time_minutes: 0 } },
+    false,
+  ],
+  ["minute strings", { scan: { max_time_minutes: "15" } }, false],
   [
     "Cyber selection",
     { scan: { cyber_access_program: "daybreak_blue" } },
@@ -128,6 +142,65 @@ const cases: [string, unknown, boolean][] = [
   ["nonpositive cost", { limits: { max_cost_usd_per_scan: 0 } }, false],
   ["incorrect native model type", { codex: { model: 42 } }, false],
 ];
+
+test("minute and deprecated hour settings follow source precedence", () => {
+  const directory = process.cwd();
+  for (const [scan, overrides, expected, sourceKey, source] of [
+    [
+      { mode: "standard", max_time_minutes: 15 },
+      {},
+      { maxTimeMinutes: 15 },
+      "scan.max_time_minutes",
+      "project",
+    ],
+    [
+      { mode: "deep", max_time_minutes: 30, deep: { max_time_hours: 2 } },
+      { maxTimeMinutes: 15 },
+      { maxTimeMinutes: 15, maxTimeHours: undefined },
+      "scan.max_time_minutes",
+      "cli",
+    ],
+    [
+      { mode: "deep", max_time_minutes: 15, deep: { max_time_hours: 1 } },
+      { maxTimeHours: 2 },
+      { maxTimeMinutes: undefined, maxTimeHours: 2 },
+      "scan.deep.max_time_hours",
+      "cli",
+    ],
+    [
+      { mode: "deep", max_time_minutes: 90, deep: { max_time_hours: 1.5 } },
+      {},
+      { maxTimeMinutes: 90, maxTimeHours: 1.5 },
+      "scan.max_time_minutes",
+      "project",
+    ],
+    [
+      { mode: "standard", max_time_minutes: 15, deep: { max_time_hours: 2 } },
+      {},
+      { maxTimeMinutes: 15, maxTimeHours: undefined },
+      "scan.max_time_minutes",
+      "project",
+    ],
+    [
+      { mode: "standard", max_time_minutes: 6000 },
+      { mode: "deep", maxTimeMinutes: 15 },
+      { maxTimeMinutes: 15 },
+      "scan.max_time_minutes",
+      "cli",
+    ],
+  ] as const) {
+    const resolved = resolveScanSettings(
+      { input: { scan }, directory },
+      overrides,
+      directory,
+    );
+    expect({
+      maxTimeMinutes: resolved.options.maxTimeMinutes,
+      maxTimeHours: resolved.options.maxTimeHours,
+    }).toMatchObject(expected);
+    expect(resolved.sources[sourceKey]).toBe(source);
+  }
+});
 
 describe("project configuration input contract", () => {
   const validate = new Ajv({ strict: true, allErrors: true }).compile(
@@ -248,10 +321,8 @@ describe("project configuration input contract", () => {
   });
 
   test.each([
-    ["invalid.yaml", "scan: [\n"],
     ["duplicate.yaml", "scan: {}\nscan: {}\n"],
     ["stream.yaml", "scan: {}\n---\nscan: {}\n"],
-    ["invalid.json", '{"scan":'],
     ["invalid.ts", "export default {};"],
     ["unknown.yaml", "scan:\n  workres: 2\n"],
   ])("rejects an invalid selected file: %s", async (name, contents) => {
@@ -261,10 +332,35 @@ describe("project configuration input contract", () => {
     await expect(readProjectConfig(path)).rejects.toThrow();
   });
 
-  test("reports a missing selected file", async () => {
-    await expect(
-      readProjectConfig("missing.yaml", await temporaryDirectory()),
-    ).rejects.toThrow("Cannot read project configuration");
+  test.each([
+    ["scan.yaml", "scan: [\n"],
+    ["scan.json", '{"scan":'],
+  ])(
+    "includes the parser message when %s cannot be parsed",
+    async (name, contents) => {
+      const path = join(await temporaryDirectory(), name);
+      await writeFile(path, contents);
+      const error = await readProjectConfig(path).catch(
+        (cause: unknown) => cause,
+      );
+      assert(error instanceof ConfigurationError);
+      assert(error.cause instanceof Error);
+      expect(error.message).toBe(
+        `Cannot parse project configuration at ${path}: ${error.cause.message}`,
+      );
+    },
+  );
+
+  test.each([
+    ["missing.yaml", "ENOENT"],
+    ["directory.yaml", "EISDIR"],
+  ])("includes the system error for %s", async (name, code) => {
+    const path = join(await temporaryDirectory(), name);
+    if (code === "EISDIR") await mkdir(path);
+    await expect(readProjectConfig(path)).rejects.toMatchObject({
+      message: expect.stringContaining(`${path}: ${code}`),
+      cause: expect.objectContaining({ code }),
+    });
   });
 });
 
