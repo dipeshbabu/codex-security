@@ -28,6 +28,7 @@ test("diff previews stay inside the selected repository", () => {
   const nested = join(repository, "src", "nested");
   mkdirSync(nested, { recursive: true });
   git(repository, "init", "-q");
+  git(repository, "config", "core.symlinks", "false");
   writeFileSync(join(repository, "src", "handler.py"), "value = 1\n");
   writeFileSync(join(repository, "src", "deleted.py"), "removed = True\n");
   writeFileSync(join(repository, "src", "entry.py"), "handler.py");
@@ -94,7 +95,6 @@ test("diff previews stay inside the selected repository", () => {
     .map((row) => JSON.parse(row) as { path: string; preview: string });
   expect(rows.map((row) => row.path)).toEqual([
     "src/deleted.py",
-    "src/entry.py",
     "src/handler.py",
     "src/nested/linked.py",
   ]);

@@ -5254,7 +5254,8 @@ describe("runtime directories and plugin Python boundary", () => {
       await mkdir(join(repository, ".git"));
       await mkdir(hostBin, { recursive: true });
       await mkdir(join(pluginRoot, "scripts"), { recursive: true });
-      await symlink(await realpath(git), trustedGit);
+      const hostGit = await realpath(git);
+      await symlink(hostGit, trustedGit);
       await writeFile(
         join(untrustedBin, basename(trustedGit)),
         `#!/bin/sh\nprintf executed > ${JSON.stringify(marker)}\nexit 1\n`,
@@ -5278,8 +5279,13 @@ describe("runtime directories and plugin Python boundary", () => {
         launchHome,
       );
       try {
+        // The symlinked Windows Git executable needs its installation's DLLs.
+        const hostPath = [
+          hostBin,
+          ...(process.platform === "win32" ? [dirname(hostGit)] : []),
+        ].join(delimiter);
         const environment = {
-          PATH: [untrustedBin, hostBin].join(delimiter),
+          PATH: [untrustedBin, hostPath].join(delimiter),
           GIT_SSH_COMMAND: "synthetic-ssh",
         };
         const result = await runWorkbench(
@@ -5301,7 +5307,7 @@ describe("runtime directories and plugin Python boundary", () => {
         );
         expect(result["git"]).toBe(trustedGit);
         expect(result["binding"]).toBe(bound ? trustedGit : null);
-        if (bound) expect(result["path"]).toBe(hostBin);
+        if (bound) expect(result["path"]).toBe(hostPath);
         expect(existsSync(marker)).toBe(false);
       } finally {
         currentDirectory.mockRestore();
