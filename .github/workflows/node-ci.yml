@@ -41,12 +41,12 @@ jobs:
         run: |
           set -euo pipefail
           container_validate=false
-          if [[ "$EVENT_NAME" == "push" ]]; then
+          if [[ "$EVENT_NAME" == "push" || "$EVENT_NAME" == "workflow_dispatch" ]]; then
             container_validate=true
           fi
           test_quality=false
           workflow_quality=false
-          if [[ "$EVENT_NAME" == "push" || "$BASE_CHANGED" == "true" ]]; then
+          if [[ "$EVENT_NAME" == "push" || "$EVENT_NAME" == "workflow_dispatch" || "$BASE_CHANGED" == "true" ]]; then
             workflow_quality=true
           fi
           if [[ "$EVENT_NAME" == "pull_request" && "$BASE_CHANGED" == "true" ]]; then
