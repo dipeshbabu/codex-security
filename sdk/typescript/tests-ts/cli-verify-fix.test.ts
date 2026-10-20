@@ -1,16 +1,20 @@
 import { requestMetadata } from "./support/request-metadata.js";
-import { describe, expect, test, mock } from "bun:test";
+import { afterEach, describe, expect, test, mock } from "bun:test";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { Writable } from "node:stream";
 import { stripVTControlCharacters } from "node:util";
-import { main } from "../src/cli.js";
+import { main, runCodexSkillCommand } from "../src/cli.js";
 import { VERSION } from "../src/version.js";
 import type { Finding, JsonObject } from "../src/index.js";
 import type { LinearClientFactory } from "../src/linear.js";
 import { capture, dependencies, fakeResult } from "./cli-fixtures.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { createCliTest, captureCli } from "./support/cli-run.js";
+import { createApiTestFixtures } from "./support/temporary-directories.js";
+
+const { temporaryDirectory, cleanup } = createApiTestFixtures("verify-fix-");
+afterEach(cleanup);
 
 async function linearIssue(identifier: string) {
   return {
@@ -452,7 +456,11 @@ describe("read-only finding verification", () => {
     async (transport) => {
       const message =
         "401 Unauthorized: stored ChatGPT credentials expired. Run codex-security login --auth chatgpt.";
-      for (const flags of [["--json"], ["--json", "--full-output"]]) {
+      for (const flags of [
+        ["--json"],
+        ["--json", "--full-output"],
+        ["--format", "jsonl"],
+      ]) {
         const { stdout, stderr, runCli } = createCliTest(main);
         expect(
           await runCli(
@@ -477,6 +485,39 @@ describe("read-only finding verification", () => {
       }
     },
   );
+
+  test("reports an authentication protocol error from a successfully exited Codex child", async () => {
+    const directory = await temporaryDirectory();
+    const message = "401 Unauthorized: synthetic ChatGPT token expired";
+    const source = `
+const lines = require("node:readline").createInterface({ input: process.stdin });
+lines.once("line", () => process.stdout.write(JSON.stringify({
+  id: 1, error: { code: -32001, message: ${JSON.stringify(message)} }
+}) + "\\n"));
+`;
+    const { stdout, stderr, runCli } = createCliTest(main);
+    expect(
+      await runCli(
+        ["verify-fix", "Synthetic finding", "--auth", "chatgpt", "--json"],
+        dependencies({
+          currentDirectory: directory,
+          onCodex: (_args, output) =>
+            runCodexSkillCommand(
+              ["-e", source],
+              { ...output!, auth: undefined },
+              { command: process.execPath },
+              {},
+            ),
+        }),
+      ),
+    ).toBe(2);
+    expect(JSON.parse(stdout.text())).toMatchObject({
+      status: "failed",
+      code: "VERIFICATION_FAILED",
+      message: expect.stringContaining(message),
+    });
+    expect(stderr.text()).toContain(message);
+  });
 
   test.each([
     ["fixed", 0],
