@@ -431,7 +431,49 @@ describe("read-only finding verification", () => {
             dependencies({ onCodex: () => codexStatus }),
           ),
         ).toBe(expectedStatus);
-        expect(stdout.text()).toBe("");
+        if (expectedStatus === 2 && flags[0] === "--json") {
+          const failure = JSON.parse(stdout.text());
+          if (flags.includes("--full-output")) {
+            expect(failure.ok).toBe(false);
+            expect(failure.error.code).toBe("VERIFICATION_FAILED");
+          } else {
+            expect(failure).toMatchObject({
+              status: "failed",
+              code: "VERIFICATION_FAILED",
+            });
+          }
+        } else expect(stdout.text()).toBe("");
+      }
+    },
+  );
+
+  test.each(["exit", "throw"] as const)(
+    "reports ChatGPT authentication diagnostics after a Codex %s failure",
+    async (transport) => {
+      const message =
+        "401 Unauthorized: stored ChatGPT credentials expired. Run codex-security login --auth chatgpt.";
+      for (const flags of [["--json"], ["--json", "--full-output"]]) {
+        const { stdout, stderr, runCli } = createCliTest(main);
+        expect(
+          await runCli(
+            ["verify-fix", "Synthetic finding", "--auth", "chatgpt", ...flags],
+            dependencies({
+              onCodex: (_args, output) => {
+                if (transport === "throw") throw new Error(message);
+                output!.stderr.write(`${message}\n`);
+                return 1;
+              },
+            }),
+          ),
+        ).toBe(2);
+        const failure = JSON.parse(stdout.text());
+        const details = flags.includes("--full-output")
+          ? failure.error
+          : failure;
+        expect(details).toMatchObject({ code: "VERIFICATION_FAILED", message });
+        expect(failure.results).toBeUndefined();
+        expect(stderr.text()).toContain(message);
+        expect(stderr.text().split(message)).toHaveLength(2);
       }
     },
   );
@@ -652,7 +694,10 @@ describe("read-only finding verification", () => {
         ),
       ).toBe(2);
 
-      expect(stdout.text()).toBe("");
+      expect(JSON.parse(stdout.text())).toMatchObject({
+        status: "failed",
+        code: "VERIFICATION_FAILED",
+      });
       expect(stderr.text()).toContain(
         "an evidence-backed verification result for every finding",
       );
