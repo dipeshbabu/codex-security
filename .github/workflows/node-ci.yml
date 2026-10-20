@@ -1,8 +1,9 @@
 name: node-ci
 
 on:
+  workflow_dispatch:
   push:
-    branches: [main]
+    branches: [ci/maintenance-windows-test-root-whoami-20261020]
   pull_request:
     types: [opened, edited, reopened, synchronize]
 
@@ -612,3 +613,36 @@ jobs:
       - name: Require every Windows coverage job
         if: needs.validate-title.result != 'success' || (needs.static-checks.result != 'success' || needs.plugin-host.result != 'success' || needs.plugin-source.result != 'success' || needs.windows-test.result != 'success' || needs.windows-verify.result != 'success')
         run: exit 1
+
+  complete-package-tests:
+    name: complete package tests / ${{ matrix.mode }}
+    needs: [validate-title, package]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - mode: seed-12345
+            args: --seed 12345
+          - mode: randomized
+            args: ''
+    steps:
+      - *checkout-repository
+      - *download-native
+      - *set-up-typescript-tools
+      - *set-up-bun
+      - *install-dependencies
+      - *download-package-for-this-commit
+      - name: Restore bundled plugin
+        run: tar -xzf dist/*.tgz --strip-components=1 -C sdk/typescript package/_bundled_plugin
+      - name: Install ripgrep
+        run: sudo apt-get update && sudo apt-get install --yes ripgrep
+      - name: Complete SDK test suite
+        working-directory: sdk/typescript
+        env:
+          TEMP: ${{ runner.temp }}
+          TMP: ${{ runner.temp }}
+          TMPDIR: ${{ runner.temp }}
+          CODEX_SECURITY_ALLOW_MACHINE_POLICY_TEST: 'false'
+        run: pnpm run test ${{ matrix.args }}
