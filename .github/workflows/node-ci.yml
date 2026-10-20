@@ -1,6 +1,7 @@
 name: node-ci
 
 on:
+  workflow_dispatch:
   push:
     branches: [ci/maintenance-pr232-20261020]
   pull_request:
