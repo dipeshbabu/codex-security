@@ -377,7 +377,16 @@ try {
 `preflightPolicy()` checks local inputs. `previewPolicy()` previews the supplied
 in-memory draft and escapes terminal controls; editing its saved file does not
 change that object. `securityPolicyDiff()` returns a raw diff for files and other
-non-terminal uses, with an optional Python interpreter.
+non-terminal uses. Both preview methods compute the diff in Node without
+discovering or launching Python; `pythonPath` and `PYTHON` do not affect previews.
+
+The optional second argument to `securityPolicyDiff(draft, python, signal)` is
+deprecated. Interpreter paths, including paths returned by a resolver callback,
+no longer select an executable or get validated. For compatibility, an explicitly
+supplied resolver is still awaited when the draft changes, and any error it throws
+propagates. Omit that argument for new code, or pass `undefined` when supplying a
+cancellation signal. Source freshness is checked before and after computing the
+diff.
 
 `generatePolicy()` accepts `auth`, `path`, `knowledgeBasePaths`, `outputDir`,
 `maxCostUsd`, `signal`, and progress/cost callbacks. `answerQuestions` receives
@@ -391,6 +400,7 @@ codex-security scan .
 codex-security scan . --path src --path tests
 codex-security scan . --diff origin/main --json
 codex-security scan . --working-tree
+codex-security scan . --owner-suggestions
 codex-security scan . --output-dir /path/outside/repository/results --dry-run
 ```
 
@@ -401,6 +411,13 @@ working copies. Their source inventories exclude `.git` and `.svn` metadata.
 changes. Both require Git. Deep scans support whole repositories and path scopes.
 Working-tree snapshots include untracked nested Git repositories. Initialized submodules must
 be clean and at the commit recorded by the parent.
+
+`--owner-suggestions` writes optional `owner-suggestions.json` after a completed
+committed Git scan, using the same checkout, model, and reasoning effort. Owner
+errors leave the base scan completed. The JSON result includes
+`ownerSuggestionsPath` or `ownerSuggestionsError`; the sealed findings and
+manifest stay unchanged. This option is unsupported for working-tree and
+directory snapshots, and is skipped with a warning when `--max-cost` is set.
 
 Repeat `--knowledge-base PATH` for context: UTF-8 text files (including JSON and
 SARIF), PDF, DOCX, or directories. Directory traversal skips other binary files;
@@ -1991,6 +2008,18 @@ text/files, and Linear inputs. Paths resolve from the invocation directory, even
 when the finding belongs to another repository. The file must be nonempty and
 regular, is read before patching, and cannot combine with `--resume-pr`.
 
+Use `--verification-mode static` to assess a patch from source and diff evidence
+without installing dependencies or running builds, tests, reproducers, or the
+application. Validation instructions become questions for that source review.
+The default is `standard`, which retains the existing verification checks.
+Static results identify the evidence and state that runtime checks were not
+performed; material proof gaps can still block verification.
+
+```bash
+codex-security patch finding.md --verification-mode static
+codex-security verify-fix finding.md --verification-mode static
+```
+
 `--assess-patch-risk` runs an advisory assessment after patching. Human-readable
 output prints its report; saved-finding JSON includes `patchRisk.report`.
 With `--create-pr`, the draft description includes the concise Markdown summary.
@@ -2053,6 +2082,9 @@ credentials out of the patch subprocess. URLs must match the selected workspace.
 `verify-fix` checks fixes in a read-only sandbox. It accepts descriptions, saved
 finding IDs, `--scan`, and the Linear issue/project selectors above. Explicitly
 filter for completed Linear issues to check a finished backlog.
+
+`--verification-mode static` selects source-only assessment, as described above
+for `patch`. Omit it or use `--verification-mode standard` for the default checks.
 
 Results include evidence and `fixed`, `still_vulnerable`, or `inconclusive` status.
 `--json` returns structured output. Exit codes are `0` when all findings are
