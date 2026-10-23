@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import shutil
 import sqlite3
@@ -275,6 +276,120 @@ def create_cli_scan(
         completion.extend(("--cost-json", json.dumps(cost)))
     run_workbench(state_dir, *completion)
     return launched
+
+
+@pytest.mark.parametrize("artifact", ["findings.json", "coverage.json", "scan-manifest.json"])
+@pytest.mark.parametrize("mutation", ["remove", "modify"])
+def test_get_scan_reads_pinned_coverage_independently_of_unrelated_artifacts(
+    tmp_path: Path, artifact: str, mutation: str
+) -> None:
+    state_dir = tmp_path / "state"
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    scan = create_cli_scan(state_dir, tmp_path / "results", repository, finding=True)
+    scan_dir = Path(scan["scanDir"])
+    before = get_scan(state_dir, scan["scanId"])["scan"]
+    assert before["coverage"]["includePaths"] == ["."]
+    artifact_path = scan_dir / artifact
+    if mutation == "remove":
+        artifact_path.unlink()
+    else:
+        artifact_path.write_bytes(artifact_path.read_bytes() + b"\n")
+
+    after = get_scan(state_dir, scan["scanId"])["scan"]
+    assert after["progress"]["status"] == "complete"
+    assert after["findings"] == before["findings"]
+    if artifact == "findings.json":
+        assert after["coverage"] == before["coverage"]
+    else:
+        assert "coverage" not in after
+
+
+@pytest.mark.parametrize("finding", [False, True])
+@pytest.mark.parametrize("follow_up", [False, True])
+def test_get_scan_reads_legacy_sealed_history_coverage_without_writes(
+    tmp_path: Path, finding: bool, follow_up: bool
+) -> None:
+    state_dir = tmp_path / "state"
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    scan = create_cli_scan(
+        state_dir, tmp_path / "results", repository, finding=finding, follow_up=follow_up
+    )
+    scan_dir = Path(scan["scanDir"])
+    artifacts = {path: path.read_bytes() for path in scan_dir.rglob("*") if path.is_file()}
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM finding_occurrences WHERE scan_id = ? AND details_json = '{}'",
+            (scan["scanId"],),
+        ).fetchone() == (0,)
+        connection.execute(
+            "UPDATE scans SET seal_manifest_digest = NULL WHERE id = ?", (scan["scanId"],)
+        )
+
+    assert get_scan(state_dir, scan["scanId"])["scan"]["coverage"] == {
+        "mode": "repository",
+        "includePaths": ["."],
+        "excludePaths": [],
+        "explicitExclusions": [],
+    }
+    assert {path: path.read_bytes() for path in scan_dir.rglob("*") if path.is_file()} == artifacts
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        assert connection.execute(
+            "SELECT seal_manifest_digest FROM scans WHERE id = ?", (scan["scanId"],)
+        ).fetchone() == (None,)
+
+
+@pytest.mark.parametrize(
+    "corruption",
+    ["coverage", "findings", "missing-coverage", "missing-manifest", "unsealed", "owner", "mode"],
+)
+def test_get_scan_rejects_unverifiable_legacy_sealed_history_coverage(
+    tmp_path: Path, corruption: str
+) -> None:
+    state_dir = tmp_path / "state"
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    scan = create_cli_scan(state_dir, tmp_path / "results", repository, finding=False)
+    scan_dir = Path(scan["scanDir"])
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        connection.execute(
+            "UPDATE scans SET seal_manifest_digest = NULL WHERE id = ?", (scan["scanId"],)
+        )
+    manifest_path = scan_dir / "scan-manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    if corruption in {"coverage", "findings"}:
+        path = scan_dir / f"{corruption}.json"
+        path.write_bytes(path.read_bytes() + b"\n")
+    elif corruption.startswith("missing-"):
+        (
+            scan_dir
+            / ("coverage.json" if corruption == "missing-coverage" else "scan-manifest.json")
+        ).unlink()
+    elif corruption == "unsealed":
+        del manifest["scan"]["sealedAt"]
+        del manifest["scan"]["artifacts"]
+        manifest_path.write_text(json.dumps(manifest))
+    elif corruption == "owner":
+        manifest["scan"]["target"]["targetId"] = "unrelated-target"
+        manifest_path.write_text(json.dumps(manifest))
+    else:
+        coverage_path = scan_dir / "coverage.json"
+        coverage = json.loads(coverage_path.read_text())
+        coverage["mode"] = "deep_repository"
+        coverage_path.write_text(json.dumps(coverage))
+        for artifact in manifest["scan"]["artifacts"]:
+            if artifact["path"] == "coverage.json":
+                artifact["sha256"] = hashlib.sha256(coverage_path.read_bytes()).hexdigest()
+        manifest_path.write_text(json.dumps(manifest))
+    artifacts = {path: path.read_bytes() for path in scan_dir.rglob("*") if path.is_file()}
+
+    assert "coverage" not in get_scan(state_dir, scan["scanId"])["scan"]
+    assert {path: path.read_bytes() for path in scan_dir.rglob("*") if path.is_file()} == artifacts
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        assert connection.execute(
+            "SELECT seal_manifest_digest FROM scans WHERE id = ?", (scan["scanId"],)
+        ).fetchone() == (None,)
 
 
 def test_cli_scan_lifecycle_persists_recipes_lineage_and_filtered_history(tmp_path: Path) -> None:
@@ -965,6 +1080,103 @@ def test_list_unmatched_scan_pairs_groups_pending_pairs_and_skips_saved_results(
         [first["scanId"]],
         [first["scanId"], second["scanId"]],
     ]
+
+
+@pytest.mark.parametrize(
+    ("before_started", "after_started"),
+    [
+        ("2026-01-02T00:15:00+02:00", "2026-01-01T21:00:00-02:00"),
+        ("2026-01-01T00:00:00Z", "2026-01-01T00:00:00.000001Z"),
+        ("2026-01-01t02:00:00.000000+02:00", "2026-01-01T00:00:00Z"),
+    ],
+)
+def test_automatic_matching_orders_instants_and_preserves_directed_cache(
+    tmp_path: Path, before_started: str, after_started: str
+) -> None:
+    state_dir = tmp_path / "state"
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    before, after = sorted(
+        (create_cli_scan(state_dir, tmp_path / "results", repository) for _ in range(2)),
+        key=lambda scan: scan["scanId"],
+    )
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        connection.executemany(
+            "UPDATE scans SET started_at = ? WHERE id = ?",
+            [(before_started, before["scanId"]), (after_started, after["scanId"])],
+        )
+    save_scan_matches(state_dir, after, before)
+
+    pending = run_workbench(state_dir, "list-unmatched-scan-pairs", "--repository", str(repository))
+    assert pending["skippedPairs"] == 0
+    assert [batch["afterScanId"] for batch in pending["batches"]] == [after["scanId"]]
+    assert [scan["scanId"] for scan in pending["batches"][0]["beforeScans"]] == [before["scanId"]]
+
+    save_scan_matches(state_dir, before, after)
+    cached = run_workbench(state_dir, "list-unmatched-scan-pairs", "--repository", str(repository))
+    assert cached["batches"] == []
+    assert cached["skippedPairs"] == 1
+    forced = run_workbench(
+        state_dir, "list-unmatched-scan-pairs", "--repository", str(repository), "--force"
+    )
+    assert forced == pending
+
+
+def test_automatic_matching_keeps_unavailable_history_without_future_links(tmp_path: Path) -> None:
+    state_dir = tmp_path / "state"
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    earlier, unavailable, current, future = (
+        create_cli_scan(
+            state_dir, tmp_path / "results", repository, identity_anchor=f"archive-check-{index}"
+        )
+        for index in range(4)
+    )
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        connection.executemany(
+            "UPDATE scans SET started_at = ? WHERE id = ?",
+            [
+                ("2026-01-01T00:00:00Z", earlier["scanId"]),
+                ("2026-01-01T03:00:00+02:00", unavailable["scanId"]),
+                ("2026-01-01T02:00:00Z", current["scanId"]),
+                ("2026-01-01T00:30:00-03:00", future["scanId"]),
+            ],
+        )
+    findings = [
+        get_scan(state_dir, scan["scanId"])["scan"]["findings"][0]
+        for scan in (unavailable, current, future)
+    ]
+    for before, after, before_finding, after_finding in (
+        (unavailable, current, findings[0], findings[1]),
+        (current, future, findings[1], findings[2]),
+    ):
+        save_scan_matches(
+            state_dir,
+            before,
+            after,
+            confirmed_match(before_finding["occurrenceId"], after_finding["occurrenceId"]),
+        )
+    shutil.rmtree(unavailable["scanDir"])
+
+    pending = run_workbench(state_dir, "list-unmatched-scan-pairs", "--repository", str(repository))
+    assert (pending["scanCount"], pending["unavailableScans"], pending["skippedPairs"]) == (4, 1, 1)
+    assert [batch["afterScanId"] for batch in pending["batches"]] == [
+        current["scanId"],
+        future["scanId"],
+    ]
+    assert [scan["scanId"] for scan in pending["batches"][0]["beforeScans"]] == [earlier["scanId"]]
+    assert pending["batches"][0]["knownFindingGroups"] == [
+        sorted(finding["findingId"] for finding in findings[:2])
+    ]
+    assert pending["batches"][1]["knownFindingGroups"] == [
+        sorted(finding["findingId"] for finding in findings)
+    ]
+
+    forced = run_workbench(
+        state_dir, "list-unmatched-scan-pairs", "--repository", str(repository), "--force"
+    )
+    assert (forced["scanCount"], forced["unavailableScans"], forced["skippedPairs"]) == (4, 1, 0)
+    assert all("knownFindingGroups" not in batch for batch in forced["batches"])
 
 
 def test_list_unmatched_scan_pairs_skips_unavailable_scan_artifacts(tmp_path: Path) -> None:
