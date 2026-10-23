@@ -1040,19 +1040,27 @@ def standard_finding(tmp_path: Path, scan_id: str, target: Path) -> dict[str, ob
 
 
 def deep_scan_fixture(
-    tmp_path: Path, *, budget: bool = False, workers: int = 1
+    tmp_path: Path,
+    *,
+    budget: bool = False,
+    workers: int = 1,
+    include_paths: list[str] | None = None,
 ) -> tuple[Path, Path, Path, Path, str]:
     state_dir = tmp_path / "state"
     codex_home = tmp_path / "codex-home"
     target = tmp_path / "target"
     target.mkdir()
     (target / "app.py").write_text("value = request.args['value']\n")
+    for relative in include_paths or []:
+        included = target / relative
+        if not included.exists():
+            included.write_text("value = 1\n")
     config_path = codex_home / "codex-security" / "config.toml"
     config_path.parent.mkdir(parents=True)
     config_path.write_text(f"[deep_scan]\nworkers = {workers}\nmax_discovery_runs = {workers}\n")
     environment = {"CODEX_HOME": str(codex_home)}
 
-    if budget:
+    if budget or include_paths is not None:
         scan_dir = tmp_path / "scan"
         scan_dir.mkdir(mode=0o700)
         registered = run_workbench(
@@ -1068,8 +1076,11 @@ def deep_scan_fixture(
                     "config": {},
                     "mode": "deep",
                     "repository": str(target),
-                    "target": {"kind": "repository", "paths": []},
-                    "maxCostUsd": 0.005,
+                    "target": {
+                        "kind": "paths" if include_paths is not None else "repository",
+                        "paths": include_paths or [],
+                    },
+                    **({"maxCostUsd": 0.005} if budget else {}),
                 }
             ),
         )
@@ -1238,7 +1249,10 @@ def standard_parent_results_fixture(
     return state_dir, codex_home, target, scan_dir, scan_id
 
 
-def test_failure_preserves_last_committed_reducer_without_parent_draft(tmp_path: Path) -> None:
+@pytest.mark.parametrize("with_coverage", [False, True])
+def test_failure_preserves_last_committed_reducer_without_parent_draft(
+    tmp_path: Path, with_coverage: bool
+) -> None:
     state_dir, codex_home, target, scan_dir, scan_id = deep_scan_fixture(tmp_path)
     worker_id, result_path = accepted_standard_worker(state_dir, codex_home, scan_dir, scan_id)
     contract_dir = standard_contract(tmp_path, scan_id, target)
@@ -1252,12 +1266,15 @@ def test_failure_preserves_last_committed_reducer_without_parent_draft(tmp_path:
     reduced["findings"][0]["summary"] = (
         "The reducer retained additional independently reviewed evidence."
     )
+    if not with_coverage:
+        reduced.pop("coverage")
     reducer_path.write_text(json.dumps(reduced))
     fail_deep_scan(state_dir, codex_home, scan_id, message="Later reducer failed.")
     failed = get_scan(state_dir, scan_id)["scan"]
     assert failed["progress"]["status"] == "failed"
     assert failed["findingCount"] == 1
     assert failed["findings"][0]["summary"] == reduced["findings"][0]["summary"]
+    assert json.loads((scan_dir / "coverage.json").read_text())["mode"] == "deep_repository"
 
 
 @pytest.mark.parametrize("tied_head", [False, True])
