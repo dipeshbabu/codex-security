@@ -434,22 +434,31 @@ describe("read-only finding verification", () => {
         ["--format", "yaml", "--full-output"],
         ["--token-count"],
       ]) {
-        const stdout = captureCli(main, "stdout");
+        const { stdout, stderr, runCli } = createCliTest(main);
         expect(
-          await stdout.run(
+          await runCli(
             ["verify-fix", "Synthetic finding", ...flags],
             dependencies({ onCodex: () => codexStatus }),
           ),
         ).toBe(expectedStatus);
+        const message = `Codex verification failed with exit code ${codexStatus}.`;
+        if (expectedStatus === 2) {
+          expect(stderr.text()).toContain(`codex-security: ${message}\n`);
+          expect(stderr.text().split(message)).toHaveLength(2);
+        } else expect(stderr.text()).not.toContain(message);
         if (expectedStatus === 2 && flags[0] === "--json") {
           const failure = JSON.parse(stdout.text());
           if (flags.includes("--full-output")) {
             expect(failure.ok).toBe(false);
-            expect(failure.error.code).toBe("VERIFICATION_FAILED");
+            expect(failure.error).toMatchObject({
+              code: "VERIFICATION_FAILED",
+              message,
+            });
           } else {
             expect(failure).toMatchObject({
               status: "failed",
               code: "VERIFICATION_FAILED",
+              message,
             });
           }
         } else expect(stdout.text()).toBe("");
@@ -463,6 +472,7 @@ describe("read-only finding verification", () => {
       const message =
         "401 Unauthorized: stored ChatGPT credentials expired. Run codex-security login --auth chatgpt.";
       for (const flags of [
+        [],
         ["--json"],
         ["--json", "--full-output"],
         ["--format", "jsonl"],
@@ -480,12 +490,18 @@ describe("read-only finding verification", () => {
             }),
           ),
         ).toBe(2);
-        const failure = JSON.parse(stdout.text());
-        const details = flags.includes("--full-output")
-          ? failure.error
-          : failure;
-        expect(details).toMatchObject({ code: "VERIFICATION_FAILED", message });
-        expect(failure.results).toBeUndefined();
+        if (flags.length === 0) expect(stdout.text()).toBe("");
+        else {
+          const failure = JSON.parse(stdout.text());
+          const details = flags.includes("--full-output")
+            ? failure.error
+            : failure;
+          expect(details).toMatchObject({
+            code: "VERIFICATION_FAILED",
+            message,
+          });
+          expect(failure.results).toBeUndefined();
+        }
         expect(stderr.text()).toContain(message);
         expect(stderr.text().split(message)).toHaveLength(2);
       }
