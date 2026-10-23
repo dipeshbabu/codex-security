@@ -402,13 +402,12 @@ The extraction root is not enforced.
         _, _, coverage = self.write_sealed_scan()
         coverage["completeness"] = "partial"
         self.rewrite_sealed_artifact("coverage.json", coverage)
-        names = ("scan-manifest.json", "findings.json", "coverage.json")
-        original = {name: (self.scan_dir / name).read_bytes() for name in names}
+        original = self.scan_file_bytes(*CANONICAL_FILES)
 
         _, _, retained = FINALIZER.finalize_scan(self.scan_dir)
 
         self.assertEqual(retained["completeness"], "partial")
-        self.assertEqual({name: (self.scan_dir / name).read_bytes() for name in names}, original)
+        self.assertEqual(self.scan_file_bytes(*CANONICAL_FILES), original)
 
     @pytest.mark.cross_platform
     def test_sealed_rerun_accepts_legacy_unknown_evidence_references(self) -> None:
@@ -704,12 +703,10 @@ The extraction root is not enforced.
         writeup_path.unlink()
         with self.assertRaisesRegex(FINALIZER.ContractError, "expected a file inside"):
             FINALIZER.finalize_scan(self.scan_dir)
-        sealed_files = {name: (self.scan_dir / name).read_bytes() for name in CANONICAL_FILES}
+        sealed_files = self.scan_file_bytes(*CANONICAL_FILES)
         with self.assertRaises(FINALIZER.ContractError):
             FINALIZER._prepare_scan_finalization(self.scan_dir, allow_missing_writeups=True)
-        self.assertEqual(
-            {name: (self.scan_dir / name).read_bytes() for name in CANONICAL_FILES}, sealed_files
-        )
+        self.assertEqual(self.scan_file_bytes(*CANONICAL_FILES), sealed_files)
 
     def test_finalize_requires_hardening_portfolio_to_be_regular_scan_local_file(self) -> None:
         portfolio_path = "hardening/hardening.md"
@@ -2919,6 +2916,25 @@ The extraction root is not enforced.
             ],
         )
         self.assertNotIn("relatedLocations", result)
+
+    def test_sarif_deduplicates_dot_prefixed_location_paths(self) -> None:
+        sarif_finding = self.sarif_finding("fingerprint")
+        sarif_finding["locations"] = [{"path": "./src/write.py", "startLine": 30, "role": "sink"}]
+        sarif_finding["codeEvidence"] = [
+            {
+                "id": "duplicate-sink",
+                "label": "Duplicate sink",
+                "path": "src/write.py",
+                "startLine": 30,
+                "code": "write(user_input)",
+                "explanation": "Already present in locations.",
+            }
+        ]
+
+        result = FINALIZER._sarif_result(sarif_finding, 0)
+
+        self.assertEqual(len(result["locations"]), 1)
+        self.assertEqual(result["locations"][0]["message"], {"text": "sink"})
 
     @pytest.mark.cross_platform
     def test_sarif_includes_legacy_code_evidence_locations(self) -> None:
