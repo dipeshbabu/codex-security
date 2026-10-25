@@ -710,11 +710,9 @@ for (const trigger of ["signal", "notification"]) {
       const inputStream = new PassThrough();
       const messages: Message[] = [];
       const writing = Promise.withResolvers<void>();
-      let release: (() => void) | undefined;
       const output = new Writable({
-        write(chunk, _encoding, callback) {
+        write(chunk) {
           messages.push(JSON.parse(chunk.toString()));
-          release = callback;
           writing.resolve();
         },
       });
@@ -734,10 +732,11 @@ for (const trigger of ["signal", "notification"]) {
             )
           : undefined;
       const controller = new AbortController();
+      let finished = false;
       onTestFinished(() => {
+        finished = true;
         operation?.mockRestore();
         output.destroy();
-        release?.();
         inputStream.destroy();
       });
       const done = runRecordsProtocol(inputStream, output, controller.signal);
@@ -750,20 +749,21 @@ for (const trigger of ["signal", "notification"]) {
         inputStream.write(
           `${JSON.stringify({ jsonrpc: "2.0", method: "cancel", params: { id: run.id } })}\n`,
         );
-      expect(await done).toBe(2);
+      const code = await done;
+      const settled = signal?.aborted
+        ? await Promise.allSettled([pendingReview, recordsResult])
+        : [];
+      // Destroying the blocked stream can resume a test after it timed out.
+      if (finished) return;
+      expect(code).toBe(2);
       expect(output.destroyed).toBe(true);
       expect(messages).toMatchObject([expected]);
-      if (operation) {
-        expect(signal?.aborted).toBe(true);
-        for (const result of await Promise.allSettled([
-          pendingReview,
-          recordsResult,
-        ])) {
-          expect(result).toEqual({
-            status: "rejected",
-            reason: new Error("Deduplication canceled."),
-          });
-        }
+      if (operation) expect(signal?.aborted).toBe(true);
+      for (const result of settled) {
+        expect(result).toEqual({
+          status: "rejected",
+          reason: new Error("Deduplication canceled."),
+        });
       }
     },
   );
