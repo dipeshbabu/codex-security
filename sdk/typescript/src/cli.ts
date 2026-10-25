@@ -60,6 +60,7 @@ import { Cli, z } from "incur";
 import Ajv2020, { type ValidateFunction } from "ajv/dist/2020.js";
 import { formatCliHelp } from "./cli-help.js";
 import { formatCoverageScope } from "./coverage-presentation.js";
+import { resolveSkillAuthentication } from "./skill-authentication.js";
 import { scanLogsJson } from "./cli-scan-logs-json.js";
 import {
   ARTIFACT_EXPORT_FILENAMES,
@@ -72,7 +73,7 @@ import {
   type ArtifactExportArguments,
 } from "./artifact-export.js";
 export { exportEnvironment } from "./artifact-export.js";
-import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
+import { parse as parseToml } from "smol-toml";
 import { parse as parseYaml } from "yaml";
 import {
   classifyConnectionFailure,
@@ -114,6 +115,7 @@ import {
 } from "./external-findings-publish.js";
 import { prepareLocalExternalImport } from "./external-findings-import.js";
 import { listLocalExternalFindings } from "./external-findings-local.js";
+import { EXTERNAL_FINDINGS_READERS } from "./external-findings-read.js";
 import type { ExternalFindings } from "./external-findings.js";
 import {
   publishPatchReview,
@@ -163,7 +165,6 @@ import {
 } from "./bulk-scan-discovery.js";
 import {
   DEFAULT_CODEX_CONFIG,
-  deepMerge,
   EXTERNAL_CODEX_PROVIDERS,
   isExternalModelProvider,
   mergeCodexOverrides,
@@ -299,6 +300,13 @@ import {
   type HistoryCommand,
 } from "./scan-history-renderer.js";
 import { ScanDashboard } from "./scan-dashboard.js";
+import {
+  ACCOUNT_LIMITS_UNAVAILABLE,
+  formatAccountLimits,
+  formatUsageFreshness,
+  isChatGptAuthentication,
+  USAGE_TIME_UNAVAILABLE,
+} from "./scan-usage-display.js";
 import {
   policyDisplayData,
   runPolicyCommand,
@@ -1469,117 +1477,25 @@ export async function runCodexSkillCommand(
         output.appServer === undefined
           ? {}
           : resolveCodexProfile(await readCodexHomeConfig(processEnvironment));
-      const overrides = parseToml(
-        stringifyToml(output.codexOverrides ?? {}),
-      ) as JsonObject;
-      const config = deepMerge(structuredClone(ambientConfig), overrides);
-      const provider = output.modelProvider ?? scanModelProvider(config);
-      // Native Codex ignores configured tables for these built-in providers.
-      const providerConfiguration =
-        typeof provider === "string" &&
-        !["openai", "ollama", "lmstudio"].includes(provider)
-          ? (
-              config["model_providers"] as
-                Record<string, JsonObject> | undefined
-            )?.[provider]
-          : undefined;
-      const providerEnvKey =
-        typeof providerConfiguration?.["env_key"] === "string"
-          ? providerConfiguration["env_key"]
-          : undefined;
-      const commandAuth = providerConfiguration?.["auth"] != null;
-      const explicitChatgpt =
-        output.auth === "chatgpt" && !isExternalModelProvider(provider);
-      const providerBearer =
-        typeof providerConfiguration?.["experimental_bearer_token"] ===
-        "string";
-      const providerKeyConfigured =
-        providerEnvKey !== undefined || providerBearer;
-      const requiresOpenAiAuth =
-        !commandAuth &&
-        (explicitChatgpt || !providerKeyConfigured) &&
-        (provider === undefined ||
-          provider === "openai" ||
-          providerConfiguration?.["requires_openai_auth"] === true ||
-          (explicitChatgpt && providerKeyConfigured));
+      const resolved = resolveSkillAuthentication(
+        { ...output, auth: output.auth },
+        processEnvironment,
+        ambientConfig,
+      );
+      const {
+        provider,
+        providerConfiguration,
+        providerEnvKey,
+        requiresOpenAiAuth,
+      } = resolved;
+      authentication = resolved.authentication;
       modelProvider = output.modelProvider;
       let credentialConfig: JsonObject | undefined;
-      if (providerEnvKey !== undefined && !commandAuth && !explicitChatgpt) {
-        const key = environmentEntry(
-          processEnvironment,
-          providerEnvKey,
-        )?.trim();
-        if (!key && output.auth === "api-key") {
-          throw new AuthenticationRequiredError(
-            `API-key authentication requires ${providerEnvKey}. Set a valid API key for the selected provider.`,
-          );
-        }
-        authentication = key
-          ? { method: "api_key", source: providerEnvKey, verified: false }
-          : { method: "stored_credentials", verified: false };
-      } else {
-        authentication = scanAuthentication(
-          processEnvironment,
-          output.auth,
-          provider,
-          commandAuth,
-        );
-      }
-      if (
-        authentication.method === "stored_credentials" &&
-        isExternalModelProvider(provider)
-      ) {
-        const externalProvider = EXTERNAL_CODEX_PROVIDERS[provider];
-        throw new AuthenticationRequiredError(
-          `Set ${providerEnvKey ?? externalProvider.env_key} to run ${output.command} through ${externalProvider.name}.`,
-        );
-      }
-      let selected = selectedScanEnvironment(
-        processEnvironment,
-        authentication.method === "command" ? "chatgpt" : output.auth,
-        provider,
-      );
-      if (
-        explicitChatgpt &&
-        !commandAuth &&
-        providerConfiguration !== undefined &&
-        providerKeyConfigured
-      ) {
-        if (providerEnvKey !== undefined) {
-          selected = Object.fromEntries(
-            Object.entries(selected).filter(([name]) =>
-              process.platform === "win32"
-                ? name.toUpperCase() !== providerEnvKey.toUpperCase()
-                : name !== providerEnvKey,
-            ),
-          );
-        }
-        // Native provider keys take precedence over stored authentication.
-        // Apply explicit ChatGPT selection to the home and CLI configuration.
-        const providerOverrides =
-          typeof provider === "string"
-            ? (
-                overrides["model_providers"] as
-                  Record<string, JsonObject> | undefined
-              )?.[provider]
-            : undefined;
-        for (const selectedConfig of [
-          providerConfiguration,
-          providerOverrides,
-        ]) {
-          if (selectedConfig === undefined) continue;
-          delete selectedConfig["env_key"];
-          delete selectedConfig["experimental_bearer_token"];
-          selectedConfig["requires_openai_auth"] = true;
-        }
-        args = [
-          ...args,
-          ...modelProviderConfigOverride(overrides).flatMap((value) => [
-            "--config",
-            value,
-          ]),
-        ];
-      }
+      let selected = resolved.environment;
+      args = [
+        ...args,
+        ...resolved.configOverrides.flatMap((value) => ["--config", value]),
+      ];
       if (
         authentication.method === "stored_credentials" &&
         requiresOpenAiAuth
@@ -3618,7 +3534,7 @@ export async function main(
         "Local repository path for --to local; authorized repository ID or URL for --to cloud.",
       ),
       provider: z
-        .enum(["wiz", "snyk", "semgrep", "endor", "github"])
+        .enum(EXTERNAL_FINDINGS_READERS)
         .describe("Provider that produced these findings."),
       sourceRepositoryUrl: optionValue("--source-repository-url")
         .optional()
@@ -5191,10 +5107,12 @@ export async function main(
                       componentName,
                       event,
                       options.showCost || settings.maxCostUsd !== undefined,
+                      settings.auth,
                     );
                     if (line !== null) errorOutput.write(line);
                   }
-                : (event) => dashboard?.recordComponentEvent(event),
+                : (event) =>
+                    dashboard?.recordComponentEvent(event, settings.auth),
             onDeduplicationStarted: () => {
               if (dashboard !== null)
                 dashboard.showComponents("Combining duplicate findings");
@@ -9249,6 +9167,8 @@ async function executeScan(
   let deepConsolidating = false;
   let runningCost: Readonly<ScanCost> | null = null;
   let runningUsage: Readonly<ScanTokenUsage> | null = null;
+  let usageFreshness: string | null = null;
+  let accountLimits: string | null = null;
   let maxCostUsd = arguments_.maxCostUsd;
   const showCost = arguments_.showCost === true || maxCostUsd !== undefined;
   let phase: string | null = null;
@@ -9483,6 +9403,9 @@ async function executeScan(
         input: scanInput,
         onInterrupt,
       });
+      dashboard.setChatGptAuth(
+        isChatGptAuthentication(selectedAuthentication, auth),
+      );
     }
     const scope = scanScope(arguments_);
     const runningMessage = (): string => {
@@ -9503,11 +9426,7 @@ async function executeScan(
           `Reviews: ${deepProgress.completed} completed, ${deepProgress.active} active, cap ${deepProgress.maximum}`,
         );
       } else if (fileProgress !== null) {
-        const count = scanProgressCount(fileProgress);
-        if (count.total > 0)
-          details.push(
-            `${count.label === "reviews" ? "Reviews" : "Files"}: ${count.completed.toLocaleString("en-US")}/${count.total.toLocaleString("en-US")}`,
-          );
+        details.push(formatScanProgressCount(fileProgress, "status"));
       }
       const tokens =
         runningCost !== null
@@ -9517,6 +9436,11 @@ async function executeScan(
       if (showCost && runningCost !== null) {
         details.push(`Cost: ${formatScanCost(runningCost)}`);
       }
+      if (tokens !== null)
+        details.push(usageFreshness ?? USAGE_TIME_UNAVAILABLE);
+      if (accountLimits !== null) details.push(diagnosticValue(accountLimits));
+      else if (isChatGptAuthentication(selectedAuthentication, auth))
+        details.push(ACCOUNT_LIMITS_UNAVAILABLE);
       return details.length === 0 ? stage : `${stage} | ${details.join(" | ")}`;
     };
     if (dashboard === null) {
@@ -9554,6 +9478,22 @@ async function executeScan(
       archiveExisting: arguments_.archiveExisting,
       parentScanId: arguments_.parentScanId,
       expectedPluginVersion: arguments_.expectedPluginVersion,
+      onUsageObservation: async (observation) => {
+        if (dashboard !== null) {
+          dashboard.setUsageObservation(observation);
+          return;
+        }
+        usageFreshness = formatUsageFreshness(observation);
+        accountLimits = formatAccountLimits(observation);
+        const priorUsage = runningUsage;
+        const priorCost = runningCost;
+        // Usage and cost callbacks render the same poll. Refresh here for a receipt alone.
+        await Promise.resolve();
+        if (runningUsage === priorUsage && runningCost === priorCost) {
+          progress?.stopTimer();
+          progress?.startTimer(runningMessage());
+        }
+      },
       onUsage: async (usage) => {
         runningUsage = usage;
         if (dashboard !== null) {
@@ -9630,6 +9570,9 @@ async function executeScan(
       },
       onAuthentication: (authentication) => {
         selectedAuthentication = authentication;
+        dashboard?.setChatGptAuth(
+          isChatGptAuthentication(authentication, auth),
+        );
         const bedrock =
           providerOptions.provider === "amazon-bedrock" ||
           authentication.method === "aws_credentials";
@@ -9754,10 +9697,8 @@ async function executeScan(
         }
         if (progress === null) return;
         progress.stopTimer();
-        const count = scanProgressCount(update);
-        progress.stage(
-          `Scan phase: ${phase}${count.total === 0 ? "" : ` (${count.completed.toLocaleString("en-US")}/${count.total.toLocaleString("en-US")} ${count.label})`}.`,
-        );
+        const count = formatScanProgressCount(update, "phase");
+        progress.stage(`Scan phase: ${phase} (${count}).`);
         progress.startTimer(runningMessage());
       },
       onDeepProgress: (update) => {
@@ -10756,21 +10697,51 @@ function printScanSummary(
   }
 }
 
+function formatScanProgressCount(
+  progress: ScanProgress,
+  style: "phase" | "status",
+): string {
+  const { label, completed, total } = scanProgressCount(progress);
+  const totalText = total.toLocaleString("en-US");
+  if (label === "files" && completed === 0) {
+    return style === "phase"
+      ? `${totalText} ${total === 1 ? "file" : "files"} inventoried`
+      : `File inventory: ${totalText}`;
+  }
+  const ratio = `${completed.toLocaleString("en-US")}/${totalText}`;
+  return style === "phase"
+    ? `${ratio} ${label}`
+    : `${label === "reviews" ? "Reviews" : "Files"}: ${ratio}`;
+}
+
 function componentScanEventLine(
   componentName: string,
   event: ComponentScanEvent,
   showCost: boolean,
+  requestedAuth?: ScanAuthMode,
 ): string | null {
+  if (event.type === "authentication") {
+    return isChatGptAuthentication(event.value, requestedAuth)
+      ? `codex-security: ${componentName} | ${ACCOUNT_LIMITS_UNAVAILABLE}\n`
+      : null;
+  }
   if (event.type === "progress") {
     const progress = event.value;
-    const count = scanProgressCount(progress);
-    return `codex-security: ${componentName} ${scanPhase(progress.phase)} | ${count.label === "reviews" ? "Reviews" : "Files"}: ${count.completed.toLocaleString("en-US")}/${count.total.toLocaleString("en-US")}\n`;
+    const count = formatScanProgressCount(progress, "status");
+    return `codex-security: ${componentName} ${scanPhase(progress.phase)} | ${count}\n`;
   }
   if (event.type === "usage") {
     const tokens = formatTokenUsage(event.value);
     return tokens === null
       ? null
       : `codex-security: ${componentName} | Tokens: ${tokens}\n`;
+  }
+  if (event.type === "usage-observation") {
+    const details = [
+      formatUsageFreshness(event.value) ?? USAGE_TIME_UNAVAILABLE,
+      formatAccountLimits(event.value),
+    ].filter((detail) => detail !== null);
+    return `codex-security: ${componentName} | ${diagnosticValue(details.join(" | "))}\n`;
   }
   if (event.type !== "cost" || !showCost) return null;
   return `codex-security: ${componentName} | Cost: ${formatScanCost(event.value)}\n`;
