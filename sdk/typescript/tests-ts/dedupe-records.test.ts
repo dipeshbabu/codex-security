@@ -696,7 +696,7 @@ test("a disconnect while flushing the final result does not send a second respon
 });
 
 for (const trigger of ["signal", "notification"]) {
-  test.each([
+  test.serial.each([
     ["review request", run.params, { method: "review.run" }],
     [
       "terminal result",
@@ -718,9 +718,20 @@ for (const trigger of ["signal", "notification"]) {
           writing.resolve();
         },
       });
+      let pendingReview: Promise<unknown> | undefined;
+      const dedupe = records.deduplicateRecords;
       const operation =
         stage === "review request"
-          ? spyOn(records, "deduplicateRecords")
+          ? spyOn(records, "deduplicateRecords").mockImplementationOnce(
+              (input, options) =>
+                dedupe(input, {
+                  ...options,
+                  reviewRunner: {
+                    run: (...args) =>
+                      (pendingReview = options.reviewRunner.run(...args)),
+                  },
+                }),
+            )
           : undefined;
       const controller = new AbortController();
       onTestFinished(() => {
@@ -733,7 +744,7 @@ for (const trigger of ["signal", "notification"]) {
       inputStream.write(`${JSON.stringify({ ...run, params })}\n`);
       await writing.promise;
       const signal = operation?.mock.calls[0]?.[1].signal;
-      const pending = operation?.mock.results[0]?.value;
+      const recordsResult = operation?.mock.results[0]?.value;
       if (trigger === "signal") controller.abort("SIGTERM");
       else
         inputStream.write(
@@ -744,7 +755,15 @@ for (const trigger of ["signal", "notification"]) {
       expect(messages).toMatchObject([expected]);
       if (operation) {
         expect(signal?.aborted).toBe(true);
-        await expect(pending).rejects.toThrow("Deduplication canceled.");
+        for (const result of await Promise.allSettled([
+          pendingReview,
+          recordsResult,
+        ])) {
+          expect(result).toEqual({
+            status: "rejected",
+            reason: new Error("Deduplication canceled."),
+          });
+        }
       }
     },
   );
