@@ -1,4 +1,5 @@
-import { expect, test, mock } from "bun:test";
+import { expect, test, mock, onTestFinished, spyOn } from "bun:test";
+import * as records from "../src/deduplication/records.js";
 import Ajv2020 from "ajv/dist/2020.js";
 import { DeduplicationReviewError } from "../src/errors.js";
 import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
@@ -694,55 +695,22 @@ test("a disconnect while flushing the final result does not send a second respon
   expect(messages).toHaveLength(1);
 });
 
-test.each(["signal", "notification"] as const)(
-  "cancellation by %s stops a blocked review request",
-  async (notification) => {
-    const inputStream = new PassThrough();
-    const messages: Message[] = [];
-    let release!: () => void;
-    let started!: () => void;
-    const writing = new Promise<void>((resolve) => {
-      started = resolve;
-    });
-    const output = new Writable({
-      write(chunk, _encoding, callback) {
-        messages.push(JSON.parse(chunk.toString()));
-        release = callback;
-        started();
-      },
-    });
-    const controller = new AbortController();
-    const done = runRecordsProtocol(inputStream, output, controller.signal);
-    try {
-      inputStream.write(`${JSON.stringify(run)}\n`);
-      await writing;
-      if (notification === "notification")
-        inputStream.write(
-          `${JSON.stringify({ jsonrpc: "2.0", method: "cancel", params: { id: run.id } })}\n`,
-        );
-      else controller.abort("SIGTERM");
-      expect(output.destroyed).toBe(true);
-      expect(await done).toBe(2);
-      expect(messages).toHaveLength(1);
-      expect(messages[0]?.method).toBe("review.run");
-    } finally {
-      output.destroy();
-      release();
-      controller.abort();
-      inputStream.destroy();
-      await done;
-    }
-  },
-);
-
-test.each(["result", "error"] as const)(
-  "cancellation stops a blocked terminal %s without sending another response",
-  async (terminal) => {
-    for (const notification of [false, true]) {
+for (const trigger of ["signal", "notification"]) {
+  test.each([
+    ["review request", run.params, { method: "review.run" }],
+    [
+      "terminal result",
+      { version: 1, observations: [], candidateRelationships: [] },
+      { result: expect.anything() },
+    ],
+    ["terminal error", {}, { error: expect.anything() }],
+  ] as const)(
+    `${trigger} stops a blocked %s`,
+    async (stage, params, expected) => {
       const inputStream = new PassThrough();
       const messages: Message[] = [];
-      let release!: () => void;
       const writing = Promise.withResolvers<void>();
+      let release: (() => void) | undefined;
       const output = new Writable({
         write(chunk, _encoding, callback) {
           messages.push(JSON.parse(chunk.toString()));
@@ -750,41 +718,37 @@ test.each(["result", "error"] as const)(
           writing.resolve();
         },
       });
+      const operation =
+        stage === "review request"
+          ? spyOn(records, "deduplicateRecords")
+          : undefined;
       const controller = new AbortController();
-      const done = runRecordsProtocol(inputStream, output, controller.signal);
-      try {
-        inputStream.write(
-          `${JSON.stringify({
-            ...run,
-            params:
-              terminal === "error"
-                ? {}
-                : {
-                    version: 1,
-                    observations: [],
-                    candidateRelationships: [],
-                  },
-          })}\n`,
-        );
-        await writing.promise;
-        if (notification)
-          inputStream.write(
-            `${JSON.stringify({ jsonrpc: "2.0", method: "cancel", params: { id: run.id } })}\n`,
-          );
-        else controller.abort("SIGTERM");
-        expect(output.destroyed).toBe(true);
-        expect(await done).toBe(2);
-        expect(messages).toHaveLength(1);
-        expect(messages[0]).toHaveProperty(terminal);
-      } finally {
-        release();
-        await done;
-        inputStream.destroy();
+      onTestFinished(() => {
+        operation?.mockRestore();
         output.destroy();
+        release?.();
+        inputStream.destroy();
+      });
+      const done = runRecordsProtocol(inputStream, output, controller.signal);
+      inputStream.write(`${JSON.stringify({ ...run, params })}\n`);
+      await writing.promise;
+      const signal = operation?.mock.calls[0]?.[1].signal;
+      const pending = operation?.mock.results[0]?.value;
+      if (trigger === "signal") controller.abort("SIGTERM");
+      else
+        inputStream.write(
+          `${JSON.stringify({ jsonrpc: "2.0", method: "cancel", params: { id: run.id } })}\n`,
+        );
+      expect(await done).toBe(2);
+      expect(output.destroyed).toBe(true);
+      expect(messages).toMatchObject([expected]);
+      if (operation) {
+        expect(signal?.aborted).toBe(true);
+        await expect(pending).rejects.toThrow("Deduplication canceled.");
       }
-    }
-  },
-);
+    },
+  );
+}
 
 test.each(["screening", "pair-review"] as const)(
   "%s refusal stops further reviews and leaves all records unresolved",
