@@ -667,6 +667,12 @@ test("disconnect before run and a broken output pipe terminate cleanly", async (
   input.destroy();
 });
 
+const emptyRecords = {
+  version: 1,
+  observations: [],
+  candidateRelationships: [],
+};
+
 test("a disconnect while flushing the final result does not send a second response", async () => {
   const inputStream = new PassThrough();
   const messages: Message[] = [];
@@ -678,16 +684,7 @@ test("a disconnect while flushing the final result does not send a second respon
     },
   });
   const done = runRecordsProtocol(inputStream, output);
-  inputStream.write(
-    `${JSON.stringify({
-      ...run,
-      params: {
-        version: 1,
-        observations: [],
-        candidateRelationships: [],
-      },
-    })}\n`,
-  );
+  inputStream.write(`${JSON.stringify({ ...run, params: emptyRecords })}\n`);
   expect(await done).toBe(0);
   expect(messages).toMatchObject([
     { id: "run-1", result: { status: "completed" } },
@@ -695,27 +692,22 @@ test("a disconnect while flushing the final result does not send a second respon
   expect(messages).toHaveLength(1);
 });
 
+const completed = { result: { status: "completed" } };
 for (const trigger of ["signal", "notification"]) {
   test.serial.each([
     ["review request", run.params, { method: "review.run" }],
-    [
-      "terminal result",
-      { version: 1, observations: [], candidateRelationships: [] },
-      { result: expect.anything() },
-    ],
+    ["terminal result", emptyRecords, completed],
+    ["terminal result flushed after cancel", emptyRecords, completed],
     ["terminal error", {}, { error: expect.anything() }],
   ] as const)(
     `${trigger} stops a blocked %s`,
     async (stage, params, expected) => {
       const inputStream = new PassThrough();
-      const messages: Message[] = [];
-      const writing = Promise.withResolvers<void>();
+      const writing = Promise.withResolvers<() => void>();
       const output = new Writable({
-        write(chunk) {
-          messages.push(JSON.parse(chunk.toString()));
-          writing.resolve();
-        },
+        write: (_chunk, _encoding, flush) => writing.resolve(flush),
       });
+      const writes = spyOn(output, "write");
       let pendingReview: Promise<unknown> | undefined;
       const dedupe = records.deduplicateRecords;
       const operation =
@@ -736,12 +728,13 @@ for (const trigger of ["signal", "notification"]) {
       onTestFinished(() => {
         finished = true;
         operation?.mockRestore();
+        writes.mockRestore();
         output.destroy();
         inputStream.destroy();
       });
       const done = runRecordsProtocol(inputStream, output, controller.signal);
       inputStream.write(`${JSON.stringify({ ...run, params })}\n`);
-      await writing.promise;
+      const flush = await writing.promise;
       const signal = operation?.mock.calls[0]?.[1].signal;
       const recordsResult = operation?.mock.results[0]?.value;
       if (trigger === "signal") controller.abort("SIGTERM");
@@ -749,6 +742,7 @@ for (const trigger of ["signal", "notification"]) {
         inputStream.write(
           `${JSON.stringify({ jsonrpc: "2.0", method: "cancel", params: { id: run.id } })}\n`,
         );
+      if (stage === "terminal result flushed after cancel") flush();
       const code = await done;
       const settled = signal?.aborted
         ? await Promise.allSettled([pendingReview, recordsResult])
@@ -757,7 +751,8 @@ for (const trigger of ["signal", "notification"]) {
       if (finished) return;
       expect(code).toBe(2);
       expect(output.destroyed).toBe(true);
-      expect(messages).toMatchObject([expected]);
+      expect(writes).toHaveBeenCalledTimes(1);
+      expect(JSON.parse(writes.mock.calls[0]![0])).toMatchObject(expected);
       if (operation) expect(signal?.aborted).toBe(true);
       for (const result of settled) {
         expect(result).toEqual({
