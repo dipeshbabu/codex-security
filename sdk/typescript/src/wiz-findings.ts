@@ -5,7 +5,8 @@ import {
   type ExternalImportTarget,
 } from "./external-import-contract.js";
 import { parseJsonOrJsonl, readScannerText } from "./scanner-import.js";
-import { readWizCsv, wizCsvFinding } from "./wiz-csv.js";
+import { isGitHubCloudHost } from "./git-remote.js";
+import { readWizCsv, wizCsvFinding, wizCsvRepositoryUrl } from "./wiz-csv.js";
 import type {
   ExternalFinding as VendorFinding,
   ExternalFindings as VendorFindings,
@@ -55,7 +56,9 @@ function wizFinding(
   const name = text(record["name"]);
   const packageName = text(record["detailedName"]);
   const version = text(record["version"]);
-  const severity = text(record["vendorSeverity"]) ?? text(record["severity"]);
+  const severity = (
+    text(record["vendorSeverity"]) ?? text(record["severity"])
+  )?.toLowerCase();
   const asset = object(record["vulnerableAsset"]);
   const artifact = object(record["artifactType"]);
   if (!name || !packageName || !text(asset?.["id"])) {
@@ -88,7 +91,7 @@ function wizFinding(
       text(record["title"]) ??
       [packageName, version, name].filter(Boolean).join(" "),
     description: text(record["description"]),
-    severity: severity?.toLowerCase(),
+    severity: severity === "none" ? "unknown" : severity,
     url: text(record["portalUrl"]),
     advisory_ids: [text(record["vulnerabilityExternalId"]) ?? name],
     packages: [
@@ -453,6 +456,37 @@ function records(payload: unknown): FindingInput {
   throw new Error(
     "Unsupported Wiz export. Supply repository vulnerability CSV, vulnerability finding objects, named sastFindings/secretInstances/iacFindings collections, or normalized JSONL. Other CSV reports need an explicit normalized JSONL mapping.",
   );
+}
+
+/** The source repository retained by a Wiz package finding or CSV row. */
+export function wizFindingRepository(
+  evidence: VendorFinding["evidence"],
+  target: ExternalImportTarget = "local",
+): ExternalSourceRepository | undefined {
+  const csvUrl = wizCsvRepositoryUrl(evidence);
+  if (csvUrl) return { url: csvUrl, platform: "github" };
+  const asset = object(evidence.source_data?.["vulnerableAsset"]);
+  if (!asset || typeof asset["cloudProviderURL"] !== "string") return;
+  const url = URL.parse(asset["cloudProviderURL"]);
+  if (!url) return;
+  const github =
+    asset["nativeType"] === "github#repositoryBranch" ||
+    (asset["type"] === "REPOSITORY_BRANCH" && isGitHubCloudHost(url.hostname));
+  if (!github)
+    return asset["type"] === "REPOSITORY_BRANCH"
+      ? { url: asset["cloudProviderURL"] }
+      : undefined;
+  const [, owner, repository] = url.pathname.split("/");
+  if (!owner || !repository) return;
+  // URL.origin drops explicit default ports, which the Cloud catalog retains.
+  const port =
+    target === "cloud"
+      ? /^https?:\/\/[^/?#\\]*:(\d+)(?:[/?#]|$)/iu.exec(
+          asset["cloudProviderURL"],
+        )?.[1]
+      : undefined;
+  const origin = port ? `${url.protocol}//${url.hostname}:${port}` : url.origin;
+  return { url: `${origin}/${owner}/${repository}`, platform: "github" };
 }
 
 export async function readVendorFindings(
