@@ -333,27 +333,16 @@ function preferredAuthUrl(value: string): string | null {
   for (const match of plainTerminalText(value).matchAll(
     /https?:\/\/[^\s<>"']+/g,
   )) {
-    let url = match[0];
-    while (true) {
-      url = url.replace(/[.,;:!?)}]+$/, "");
-      let parsed: URL;
-      try {
-        parsed = new URL(url);
-      } catch {
-        if (!url.endsWith("]")) break;
-        url = url.slice(0, -1);
-        continue;
-      }
-      if (
-        url.endsWith("]") &&
-        (!parsed.hostname.startsWith("[") ||
-          parsed.pathname !== "/" ||
-          parsed.search !== "" ||
-          parsed.hash !== "")
-      ) {
-        url = url.slice(0, -1);
-        continue;
-      }
+    // A bracket ending an IPv6 authority belongs to the URL, even in prose.
+    const candidate = match[0];
+    const ipv6Authority =
+      candidate.match(/^https?:\/\/(?:[^\\/?#]*@)?\[[\da-fA-F:.]+\]/)?.[0] ??
+      "";
+    const url =
+      ipv6Authority +
+      candidate.slice(ipv6Authority.length).replace(/[.,;:!?)\]}]+$/, "");
+    try {
+      const parsed = new URL(url);
       const hostname = parsed.hostname.toLowerCase().replace(/\.$/, "");
       if (
         parsed.protocol === "https:" &&
@@ -369,7 +358,8 @@ function preferredAuthUrl(value: string): string | null {
       ) {
         return url;
       }
-      break;
+    } catch {
+      continue;
     }
   }
   return null;
